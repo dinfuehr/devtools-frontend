@@ -477,8 +477,8 @@ describe('The Performance panel landing page', function() {
       await navigateToMemoryTab(devToolsPage);
       await takeHeapSnapshot(undefined, devToolsPage);
       await waitForNonEmptyHeapSnapshotData(devToolsPage);
-      await setClassFilter('Detached <button>', devToolsPage);
-      const row = await getCategoryRow('Detached <button>', false, devToolsPage);
+      await setClassFilter('<button>', devToolsPage);
+      const row = await getCategoryRow('<button>', false, devToolsPage);
       assert.isNull(row);
     } finally {
       await inspectedPageSession.detach();

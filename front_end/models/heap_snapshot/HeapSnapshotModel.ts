@@ -10,6 +10,12 @@ export const HeapSnapshotProgressEvent = {
 export const baseSystemDistance = 100000000;
 export const baseUnreachableDistance = baseSystemDistance * 2;
 
+export enum DOMLinkState {
+  UNKNOWN = 0,
+  ATTACHED = 1,
+  DETACHED = 2,
+}
+
 export class AllocationNodeCallers {
   nodesWithSingleCaller: SerializedAllocationNode[];
   branchingCallers: SerializedAllocationNode[];
@@ -71,6 +77,7 @@ export class Node {
   retainedSize: number;
   selfSize: number;
   type: string;
+  detachedness: DOMLinkState;
   canBeQueried = false;
   detachedDOMTreeNode = false;
   isAddedNotRemoved: boolean|null = null;
@@ -83,6 +90,7 @@ export class Node {
       retainedSize: number,
       selfSize: number,
       type: string,
+      detachedness = DOMLinkState.UNKNOWN,
   ) {
     this.id = id;
     this.name = name;
@@ -91,6 +99,7 @@ export class Node {
     this.retainedSize = retainedSize;
     this.selfSize = selfSize;
     this.type = type;
+    this.detachedness = detachedness;
   }
 }
 
@@ -115,15 +124,18 @@ export interface AggregatedInfo {
   maxRet: number;
   name: string;
   idxs: number[];
+  detachedness: DOMLinkState;
 }
 
 export class AggregateForDiff {
   name: string;
+  detachedness: DOMLinkState;
   indexes: number[];
   ids: number[];
   selfSizes: number[];
   constructor() {
     this.name = '';
+    this.detachedness = DOMLinkState.UNKNOWN;
     this.indexes = [];
     this.ids = [];
     this.selfSizes = [];
@@ -132,6 +144,7 @@ export class AggregateForDiff {
 
 export class Diff {
   name: string;
+  detachedness: DOMLinkState;
   addedCount = 0;
   removedCount = 0;
   addedSize = 0;
@@ -140,8 +153,9 @@ export class Diff {
   addedIndexes: number[] = [];
   countDelta!: number;
   sizeDelta!: number;
-  constructor(name: string) {
+  constructor(name: string, detachedness = DOMLinkState.UNKNOWN) {
     this.name = name;
+    this.detachedness = detachedness;
   }
 }
 

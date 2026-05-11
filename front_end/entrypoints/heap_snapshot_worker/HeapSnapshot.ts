@@ -454,7 +454,8 @@ export class HeapSnapshotNode implements HeapSnapshotItem {
 
   serialize(): HeapSnapshotModel.HeapSnapshotModel.Node {
     return new HeapSnapshotModel.HeapSnapshotModel.Node(
-        this.id(), this.name(), this.distance(), this.nodeIndex, this.retainedSize(), this.selfSize(), this.type());
+        this.id(), this.name(), this.distance(), this.nodeIndex, this.retainedSize(), this.selfSize(), this.type(),
+        this.detachedness());
   }
 
   rawNameIndex(): number {
@@ -836,12 +837,13 @@ export class SecondaryInitManager {
 /**
  * DOM node link state.
  */
-const enum DOMLinkState {
-  UNKNOWN = 0,
-  ATTACHED = 1,
-  DETACHED = 2,
-}
+const DOMLinkState = HeapSnapshotModel.HeapSnapshotModel.DOMLinkState;
+type DOMLinkState = HeapSnapshotModel.HeapSnapshotModel.DOMLinkState;
 const BITMASK_FOR_DOM_LINK_STATE = 3;
+
+function mergeDOMLinkState(current: DOMLinkState, next: DOMLinkState): DOMLinkState {
+  return current === next ? current : DOMLinkState.UNKNOWN;
+}
 
 // The class index is stored in the upper 30 bits of the detachedness field.
 const SHIFT_FOR_CLASS_INDEX = 2;
@@ -1559,7 +1561,7 @@ export abstract class HeapSnapshot {
         selfSizes[i] = node.selfSize();
       }
 
-      result[classKey] = {name: node.className(), indexes, ids, selfSizes};
+      result[classKey] = {name: aggregate.name, detachedness: aggregate.detachedness, indexes, ids, selfSizes};
     }
 
     this.#aggregatesForDiff = {interfaceDefinitions, aggregates: result};
@@ -1695,6 +1697,7 @@ export abstract class HeapSnapshot {
           maxRet: 0,
           name: node.className(),
           idxs: [nodeIndex],
+          detachedness: node.detachedness(),
         };
         aggregates.set(classKey, aggregate);
       } else {
@@ -1702,6 +1705,7 @@ export abstract class HeapSnapshot {
         ++aggregate.count;
         aggregate.self += selfSize;
         aggregate.idxs.push(nodeIndex);
+        aggregate.detachedness = mergeDOMLinkState(aggregate.detachedness, node.detachedness());
       }
     }
 
@@ -2489,7 +2493,7 @@ export abstract class HeapSnapshot {
 
   /**
    * The phase propagates whether a node is attached or detached through the
-   * graph and adjusts the low-level representation of nodes.
+   * graph.
    *
    * State propagation:
    * 1. Any object reachable from an attached object is itself attached.
@@ -2497,8 +2501,7 @@ export abstract class HeapSnapshot {
    *    attached is considered detached.
    *
    * Representation:
-   * - Name of any detached node is changed from "<Name>"" to
-   *   "Detached <Name>".
+   * - The propagated state is stored in the node's detachedness field.
    */
   private propagateDOMState(): void {
     if (this.nodeDetachednessAndClassIndexOffset === -1) {
@@ -2511,57 +2514,32 @@ export abstract class HeapSnapshot {
     const attached: number[] = [];
     const detached: number[] = [];
 
-    const stringIndexCache = new Map<number, number>();
     const node = this.createNode(0);
 
     /**
-     * Adds a 'Detached ' prefix to the name of a node.
-     */
-    const addDetachedPrefixToNodeName = function(snapshot: HeapSnapshot, nodeIndex: number): void {
-      const oldStringIndex = snapshot.nodes.getValue(nodeIndex + snapshot.nodeNameOffset);
-      let newStringIndex = stringIndexCache.get(oldStringIndex);
-      if (newStringIndex === undefined) {
-        newStringIndex = snapshot.addString('Detached ' + snapshot.strings[oldStringIndex]);
-        stringIndexCache.set(oldStringIndex, newStringIndex);
-      }
-      snapshot.nodes.setValue(nodeIndex + snapshot.nodeNameOffset, newStringIndex);
-    };
-
-    /**
      * Processes a node represented by nodeOrdinal:
-     * - Changes its name based on newState.
+     * - Updates its detachedness based on newState.
      * - Puts it onto working sets for attached or detached nodes.
      */
-    const processNode = function(snapshot: HeapSnapshot, nodeOrdinal: number, newState: number): void {
+    const processNode = function(snapshot: HeapSnapshot, nodeOrdinal: number, newState: DOMLinkState): void {
       if (visited[nodeOrdinal]) {
         return;
       }
 
       const nodeIndex = nodeOrdinal * snapshot.nodeFieldCount;
-
-      // Early bailout: Do not propagate the state (and name change) through JavaScript. Every
-      // entry point into embedder code is a node that knows its own state. All embedder nodes
-      // have their node type set to native.
-      if (snapshot.nodes.getValue(nodeIndex + snapshot.nodeTypeOffset) !== snapshot.nodeNativeType) {
-        visited[nodeOrdinal] = 1;
-        return;
-      }
-
       node.nodeIndex = nodeIndex;
       node.setDetachedness(newState);
 
       if (newState === DOMLinkState.ATTACHED) {
         attached.push(nodeOrdinal);
       } else if (newState === DOMLinkState.DETACHED) {
-        // Detached state: Rewire node name.
-        addDetachedPrefixToNodeName(snapshot, nodeIndex);
         detached.push(nodeOrdinal);
       }
 
       visited[nodeOrdinal] = 1;
     };
 
-    const propagateState = function(snapshot: HeapSnapshot, parentNodeOrdinal: number, newState: number): void {
+    const propagateState = function(snapshot: HeapSnapshot, parentNodeOrdinal: number, newState: DOMLinkState): void {
       snapshot.iterateFilteredChildren(
           parentNodeOrdinal,
           edgeType => ![snapshot.edgeHiddenType, snapshot.edgeInvisibleType, snapshot.edgeWeakType].includes(edgeType),
@@ -2570,8 +2548,7 @@ export abstract class HeapSnapshot {
 
     // 1. We re-use the deserialized field to store the propagated state. While
     //    the state for known nodes is already set, they still need to go
-    //    through processing to have their name adjusted and them enqueued in
-    //    the respective queues.
+    //    through processing to be enqueued in the respective queues.
     for (let nodeOrdinal = 0; nodeOrdinal < this.nodeCount; ++nodeOrdinal) {
       node.nodeIndex = nodeOrdinal * this.nodeFieldCount;
       const state = node.detachedness();
@@ -2723,7 +2700,9 @@ export abstract class HeapSnapshot {
     let j = 0;
     const l = baseIds.length;
     const m = indexes.length;
-    const diff = new HeapSnapshotModel.HeapSnapshotModel.Diff(aggregate ? aggregate.name : baseAggregate.name);
+    const diff = new HeapSnapshotModel.HeapSnapshotModel.Diff(
+        aggregate ? aggregate.name : baseAggregate.name,
+        aggregate ? aggregate.detachedness : baseAggregate.detachedness);
 
     const nodeB = this.createNode(indexes[j]);
     while (i < l && j < m) {
@@ -3512,7 +3491,9 @@ export class JSHeapSnapshot extends HeapSnapshot {
         continue;
       }
       node.nodeIndex = nodeIndex;
-      if (node.name().startsWith('Detached ')) {
+      if (this.nodeDetachednessAndClassIndexOffset !== -1 && node.detachedness() === DOMLinkState.DETACHED) {
+        this.flags[ordinal] |= flag;
+      } else if (this.nodeDetachednessAndClassIndexOffset === -1 && node.name().startsWith('Detached ')) {
         this.flags[ordinal] |= flag;
       }
     }

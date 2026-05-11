@@ -44,6 +44,10 @@ const UIStrings = {
    */
   distance: 'Distance',
   /**
+   * @description Column header in Heap Snapshot Data Grids of a profiler tool showing the DOM attachment state.
+   */
+  domState: 'DOM state',
+  /**
    * @description Text in Heap Snapshot Data Grids of a profiler tool. Shallow size is the size of just this node, not including children/retained size.
    */
   shallowSize: 'Shallow Size',
@@ -150,6 +154,7 @@ export class HeapSnapshotSortableDataGrid extends Common.ObjectWrapper
     this.dataDisplayDelegateInternal = dataDisplayDelegate;
     const tooltips = [
       ['distance', i18nString(UIStrings.distanceFromWindowObject)],
+      ['detachedness', i18nString(UIStrings.domState)],
       ['shallowSize', i18nString(UIStrings.sizeOfTheObjectItselfInBytes)],
       ['retainedSize', i18nString(UIStrings.sizeOfTheObjectPlusTheGraphIt)],
     ];
@@ -638,6 +643,7 @@ export class HeapSnapshotContainmentDataGrid extends HeapSnapshotSortableDataGri
         fixedWidth: true,
         sort: DataGrid.DataGrid.Order.Descending,
       },
+      {id: 'detachedness', title: i18nString(UIStrings.domState), width: '85px', sortable: true, fixedWidth: true},
     ];
     columns = columns || defaultColumns;
     super(heapProfilerModel, dataDisplayDelegate, {displayName, columns});
@@ -684,6 +690,7 @@ export class HeapSnapshotRetainmentDataGrid extends HeapSnapshotContainmentDataG
       },
       {id: 'shallowSize', title: i18nString(UIStrings.shallowSize), width: '110px', sortable: true, fixedWidth: true},
       {id: 'retainedSize', title: i18nString(UIStrings.retainedSize), width: '110px', sortable: true, fixedWidth: true},
+      {id: 'detachedness', title: i18nString(UIStrings.domState), width: '85px', sortable: true, fixedWidth: true},
     ];
     super(heapProfilerModel, dataDisplayDelegate, i18nString(UIStrings.heapSnapshotRetainment), columns);
   }
@@ -708,6 +715,8 @@ export class HeapSnapshotRetainmentDataGrid extends HeapSnapshotContainmentDataG
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('retainedSize', sortAscending, 'name', true);
       case 'distance':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('distance', sortAscending, 'name', true);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('detachedness', sortAscending, 'name', true);
       default:
         throw new Error(`Unknown column ${sortColumn}`);
     }
@@ -776,6 +785,7 @@ export class HeapSnapshotConstructorsDataGrid extends HeapSnapshotViewportDataGr
         sortable: true,
         fixedWidth: true,
       },
+      {id: 'detachedness', title: i18nString(UIStrings.domState), width: '85px', sortable: true, fixedWidth: true},
     ];
     super(
         heapProfilerModel,
@@ -795,6 +805,9 @@ export class HeapSnapshotConstructorsDataGrid extends HeapSnapshotViewportDataGr
       case 'distance':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig(
             'distance', sortAscending, 'retainedSize', false);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig(
+            'detachedness', sortAscending, 'retainedSize', false);
       case 'shallowSize':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('shallowSize', sortAscending, 'name', true);
       case 'retainedSize':
@@ -931,6 +944,7 @@ export class HeapSnapshotDiffDataGrid extends HeapSnapshotViewportDataGrid {
       },
       {id: 'removedSize', title: i18nString(UIStrings.freedSize), width: '75px', sortable: true, fixedWidth: true},
       {id: 'sizeDelta', title: i18nString(UIStrings.sizeDelta), width: '75px', sortable: true, fixedWidth: true},
+      {id: 'detachedness', title: i18nString(UIStrings.domState), width: '85px', sortable: true, fixedWidth: true},
     ];
     super(
         heapProfilerModel, dataDisplayDelegate,
@@ -946,6 +960,8 @@ export class HeapSnapshotDiffDataGrid extends HeapSnapshotViewportDataGrid {
     switch (sortColumn) {
       case 'object':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('name', sortAscending, 'count', false);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('detachedness', sortAscending, 'name', true);
       case 'addedCount':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('addedCount', sortAscending, 'name', true);
       case 'removedCount':

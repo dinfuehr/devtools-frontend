@@ -46,6 +46,18 @@ const UIStrings = {
    */
   detachedFromDomTree: 'Detached from DOM tree',
   /**
+   * @description Text in Heap Snapshot Grid Nodes of a profiler tool. The object is attached to the DOM tree.
+   */
+  attached: 'Attached',
+  /**
+   * @description Text in Heap Snapshot Grid Nodes of a profiler tool. The object is detached from the DOM tree.
+   */
+  detached: 'Detached',
+  /**
+   * @description Text in Heap Snapshot Grid Nodes of a profiler tool. The object's DOM attachment state is unknown.
+   */
+  unknown: 'Unknown',
+  /**
    * @description Text in Heap Snapshot Grid Nodes of a profiler tool
    */
   previewIsNotAvailable: 'Preview is not available',
@@ -129,6 +141,18 @@ const UIStrings = {
 } as const;
 const str_ = i18n.i18n.registerUIStrings('panels/profiler/HeapSnapshotGridNodes.ts', UIStrings);
 const i18nString = i18n.i18n.getLocalizedString.bind(undefined, str_);
+
+function domLinkStateToString(detachedness: HeapSnapshotModel.HeapSnapshotModel.DOMLinkState): string {
+  switch (detachedness) {
+    case HeapSnapshotModel.HeapSnapshotModel.DOMLinkState.ATTACHED:
+      return i18nString(UIStrings.attached);
+    case HeapSnapshotModel.HeapSnapshotModel.DOMLinkState.DETACHED:
+      return i18nString(UIStrings.detached);
+    case HeapSnapshotModel.HeapSnapshotModel.DOMLinkState.UNKNOWN:
+      return i18nString(UIStrings.unknown);
+  }
+  return i18nString(UIStrings.unknown);
+}
 
 class HeapSnapshotGridNodeBase extends DataGrid.DataGrid.DataGridNode<HeapSnapshotGridNode> {}
 
@@ -523,6 +547,8 @@ export abstract class HeapSnapshotGenericObjectNode extends HeapSnapshotGridNode
   readonly retainedSize: number|undefined;
   snapshotNodeId: number|undefined;
   snapshotNodeIndex: number|undefined;
+  readonly detachedness: HeapSnapshotModel.HeapSnapshotModel.DOMLinkState =
+      HeapSnapshotModel.HeapSnapshotModel.DOMLinkState.UNKNOWN;
   detachedDOMTreeNode: boolean|undefined;
   linkElement?: Element;
 
@@ -540,6 +566,7 @@ export abstract class HeapSnapshotGenericObjectNode extends HeapSnapshotGridNode
     this.retainedSize = node.retainedSize;
     this.snapshotNodeId = node.id;
     this.snapshotNodeIndex = node.nodeIndex;
+    this.detachedness = node.detachedness;
     if (this.type === 'string') {
       this.reachableFromWindow = true;
     } else if (this.type === 'object' && this.nameInternal.startsWith('Window')) {
@@ -560,6 +587,7 @@ export abstract class HeapSnapshotGenericObjectNode extends HeapSnapshotGridNode
       distance: this.toUIDistance(this.distance),
       shallowSize: i18n.ByteUtilities.formatBytesToKb(this.shallowSize),
       retainedSize: i18n.ByteUtilities.formatBytesToKb(this.retainedSize),
+      detachedness: domLinkStateToString(this.detachedness),
       'shallowSize-percent': this.toPercentString(shallowSizePercent),
       'retainedSize-percent': this.toPercentString(retainedSizePercent),
       'shallowSize-tooltip': i18n.ByteUtilities.bytesToString(this.shallowSize),
@@ -584,7 +612,8 @@ export abstract class HeapSnapshotGenericObjectNode extends HeapSnapshotGridNode
   }
 
   override createCell(columnId: string): HTMLElement {
-    return columnId !== 'object' ? this.createValueCell(columnId) : this.createObjectCell();
+    return columnId === 'object' ? this.createObjectCell() :
+        (columnId === 'detachedness' ? super.createCell(columnId) : this.createValueCell(columnId));
   }
 
   createObjectCell(): HTMLElement {
@@ -875,6 +904,8 @@ export class HeapSnapshotObjectNode extends HeapSnapshotGenericObjectNode {
             'retainedSize', sortAscending, '!edgeName', true);
       case 'distance':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('distance', sortAscending, 'name', true);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('detachedness', sortAscending, 'name', true);
       default:
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('!edgeName', true, 'retainedSize', false);
     }
@@ -1083,6 +1114,9 @@ export class HeapSnapshotInstanceNode extends HeapSnapshotGenericObjectNode {
       case 'distance':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig(
             'distance', sortAscending, 'retainedSize', false);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig(
+            'detachedness', sortAscending, 'retainedSize', false);
       case 'count':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('!edgeName', true, 'retainedSize', false);
       case 'addedSize':
@@ -1107,6 +1141,7 @@ export class HeapSnapshotConstructorNode extends HeapSnapshotGridNode {
   readonly count: number;
   readonly shallowSize: number;
   readonly retainedSize: number;
+  readonly detachedness: HeapSnapshotModel.HeapSnapshotModel.DOMLinkState;
   readonly classKey: string;
 
   #numberFormatter = new Intl.NumberFormat(i18n.DevToolsLocale.DevToolsLocale.instance().locale);
@@ -1122,6 +1157,7 @@ export class HeapSnapshotConstructorNode extends HeapSnapshotGridNode {
     this.count = aggregate.count;
     this.shallowSize = aggregate.self;
     this.retainedSize = aggregate.maxRet;
+    this.detachedness = aggregate.detachedness;
     this.classKey = classKey;
 
     const snapshot = (dataGrid.snapshot as HeapSnapshotModel.HeapSnapshotProxy.HeapSnapshotProxy);
@@ -1131,6 +1167,7 @@ export class HeapSnapshotConstructorNode extends HeapSnapshotGridNode {
       object: this.nameInternal,
       count: this.#numberFormatter.format(this.count),
       distance: this.toUIDistance(this.distance),
+      detachedness: domLinkStateToString(this.detachedness),
       shallowSize: i18n.ByteUtilities.formatBytesToKb(this.shallowSize),
       retainedSize: i18n.ByteUtilities.formatBytesToKb(this.retainedSize),
       'shallowSize-percent': this.toPercentString(shallowSizePercent),
@@ -1170,7 +1207,8 @@ export class HeapSnapshotConstructorNode extends HeapSnapshotGridNode {
   }
 
   override createCell(columnId: string): HTMLElement {
-    const cell = columnId === 'object' ? super.createCell(columnId) : this.createValueCell(columnId);
+    const cell = columnId === 'object' || columnId === 'detachedness' ? super.createCell(columnId) :
+                                                                        this.createValueCell(columnId);
     if (columnId === 'object' && this.count > 1) {
       const template = html`<span class="objects-count">×${this.data.count}</span>`;
       render(template, cell);
@@ -1195,6 +1233,9 @@ export class HeapSnapshotConstructorNode extends HeapSnapshotGridNode {
       case 'distance':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig(
             'distance', sortAscending, 'retainedSize', false);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig(
+            'detachedness', sortAscending, 'retainedSize', false);
       case 'shallowSize':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('selfSize', sortAscending, 'id', true);
       case 'retainedSize':
@@ -1283,6 +1324,7 @@ export class HeapSnapshotDiffNode extends HeapSnapshotGridNode {
   readonly addedSize: number;
   readonly removedSize: number;
   readonly sizeDelta: number;
+  readonly detachedness: HeapSnapshotModel.HeapSnapshotModel.DOMLinkState;
   readonly deletedIndexes: number[];
   readonly classKey: string;
 
@@ -1299,10 +1341,12 @@ export class HeapSnapshotDiffNode extends HeapSnapshotGridNode {
     this.addedSize = diffForClass.addedSize;
     this.removedSize = diffForClass.removedSize;
     this.sizeDelta = diffForClass.sizeDelta;
+    this.detachedness = diffForClass.detachedness;
     this.deletedIndexes = diffForClass.deletedIndexes;
     this.classKey = classKey;
     this.data = {
       object: this.nameInternal,
+      detachedness: domLinkStateToString(this.detachedness),
       addedCount: Platform.NumberUtilities.withThousandsSeparator(this.addedCount),
       removedCount: Platform.NumberUtilities.withThousandsSeparator(this.removedCount),
       countDelta: this.signForDelta(this.countDelta) +
@@ -1333,7 +1377,7 @@ export class HeapSnapshotDiffNode extends HeapSnapshotGridNode {
 
   override createCell(columnId: string): HTMLElement {
     const cell = super.createCell(columnId);
-    if (columnId !== 'object') {
+    if (columnId !== 'object' && columnId !== 'detachedness') {
       cell.classList.add('numeric-column');
     }
     return cell;
@@ -1362,6 +1406,8 @@ export class HeapSnapshotDiffNode extends HeapSnapshotGridNode {
     switch (sortColumnId) {
       case 'object':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('name', sortAscending, 'id', true);
+      case 'detachedness':
+        return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('detachedness', sortAscending, 'id', true);
       case 'addedCount':
         return new HeapSnapshotModel.HeapSnapshotModel.ComparatorConfig('name', true, 'id', true);
       case 'removedCount':

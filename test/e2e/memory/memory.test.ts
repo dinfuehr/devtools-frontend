@@ -96,8 +96,7 @@ describe('The Memory Panel', function() {
     await findSearchResult('leaking()', undefined, devToolsPage);
     await waitForRetainerChain(
         [
-          'Detached V8EventListener', 'Detached EventListener', 'Detached InternalNode', 'Detached InternalNode',
-          'Detached InternalNode', 'Detached <div>', 'Retainer',
+          'V8EventListener', 'EventListener', 'InternalNode', 'InternalNode', 'InternalNode', '<div>', 'Retainer',
           `Window [JSGlobalObject] / localhost:${inspectedPage.serverPort}`,
           `system / NativeContext / https://localhost:${inspectedPage.serverPort}`
         ],
@@ -182,7 +181,7 @@ describe('The Memory Panel', function() {
     await navigateToMemoryTab(devToolsPage);
     await takeHeapSnapshot(undefined, devToolsPage);
     await waitForNonEmptyHeapSnapshotData(devToolsPage);
-    await setSearchFilter('Detached <div>', devToolsPage);
+    await setSearchFilter('<div>', devToolsPage);
     await waitForSearchResultNumber(3, devToolsPage);
   });
 
@@ -271,7 +270,7 @@ describe('The Memory Panel', function() {
     await setSearchFilter('Leak', devToolsPage);
     await waitForSearchResultNumber(9, devToolsPage);
     await waitUntilRetainerChainSatisfies(
-        retainerChain => retainerChain.some(({retainerClassName}) => retainerClassName === 'Detached Window'),
+        retainerChain => retainerChain.some(({retainerClassName}) => retainerClassName === 'Window'),
         devToolsPage,
     );
   });
@@ -281,7 +280,7 @@ describe('The Memory Panel', function() {
     await navigateToMemoryTab(devToolsPage);
     await takeHeapSnapshot(undefined, devToolsPage);
     await waitForNonEmptyHeapSnapshotData(devToolsPage);
-    await setSearchFilter('Detached <div>', devToolsPage);
+    await setSearchFilter('<div>', devToolsPage);
     await waitForSearchResultNumber(3, devToolsPage);
     await devToolsPage.waitForFunction(async () => {
       if (await checkRetainerChainSatisfies(retainerChain => {
@@ -559,9 +558,8 @@ describe('The Memory Panel', function() {
     await takeHeapSnapshot(undefined, devToolsPage);
     await waitForNonEmptyHeapSnapshotData(devToolsPage);
     await setClassFilter('<div>', devToolsPage);
-    assert.strictEqual(3, await getCountFromCategoryRowWithName('<div>', devToolsPage));
-    assert.strictEqual(3, await getCountFromCategoryRowWithName('Detached <div>', devToolsPage));
-    await setSearchFilter('Detached <div data-x="p" data-y="q">', devToolsPage);
+    assert.strictEqual(6, await getCountFromCategoryRowWithName('<div>', devToolsPage));
+    await setSearchFilter('<div data-x="p" data-y="q">', devToolsPage);
     await waitForSearchResultNumber(1, devToolsPage);
   });
 
