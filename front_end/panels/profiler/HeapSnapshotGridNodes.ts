@@ -788,6 +788,101 @@ export abstract class HeapSnapshotGenericObjectNode extends HeapSnapshotGridNode
   }
 }
 
+export class HeapSnapshotValueNode extends HeapSnapshotGridNode {
+  readonly referenceName: string;
+  readonly referenceType: string;
+  readonly edgeIndex: number;
+  readonly value: HeapSnapshotModel.HeapSnapshotModel.EdgeValue;
+
+  constructor(dataGrid: HeapSnapshotSortableDataGrid, edge: HeapSnapshotModel.HeapSnapshotModel.Edge) {
+    super(dataGrid, false);
+    if (!edge.value) {
+      throw new Error('HeapSnapshotValueNode requires a value edge');
+    }
+    this.referenceName = edge.name;
+    this.referenceType = edge.type;
+    this.edgeIndex = edge.edgeIndex;
+    this.value = edge.value;
+    this.data = {
+      distance: '',
+      shallowSize: '',
+      retainedSize: '',
+      'shallowSize-percent': '',
+      'retainedSize-percent': '',
+      count: '',
+      addedCount: '',
+      removedCount: '',
+      countDelta: '',
+      addedSize: '',
+      removedSize: '',
+      sizeDelta: '',
+    };
+  }
+
+  override get name(): string|undefined {
+    return this.value.value;
+  }
+
+  override getHash(): number {
+    return this.edgeIndex;
+  }
+
+  override createCell(columnId: string): HTMLElement {
+    if (columnId !== 'object') {
+      const cell = document.createElement('td');
+      cell.textContent = String(this.data[columnId] || '');
+      return cell;
+    }
+
+    const cell = document.createElement('td');
+    cell.className = 'object-column';
+    const container = document.createElement('div');
+    container.className = 'source-code event-properties';
+    container.style.overflow = 'visible';
+
+    const property = document.createElement('span');
+    property.classList.add('property-name', 'name');
+    property.textContent = this.referenceName || '(empty)';
+
+    const separator = document.createElement('span');
+    separator.classList.add('grayed');
+    separator.textContent = '::';
+
+    const value = document.createElement('span');
+    value.classList.add('value', `object-value-${this.valueStyle()}`);
+    value.textContent = this.formattedValue();
+
+    container.append(property, separator, value);
+    cell.appendChild(container);
+    if (this.depth) {
+      cell.style.setProperty(
+          'padding-left', (this.depth * (this.dataGrid as HeapSnapshotSortableDataGrid).indentWidth) + 'px');
+    }
+    return cell;
+  }
+
+  private valueStyle(): string {
+    switch (this.value.type) {
+      case 'int':
+      case 'double':
+        return 'number';
+      case 'bool':
+        return 'boolean';
+      case 'string':
+        return 'string';
+      default:
+        return 'object';
+    }
+  }
+
+  private formattedValue(): string {
+    if (this.value.type === 'string') {
+      return `"${this.value.value}"`;
+    }
+    return this.value.value;
+  }
+}
+
 export class HeapSnapshotObjectNode extends HeapSnapshotGenericObjectNode {
   override referenceName: string;
   readonly referenceType: string;
@@ -799,7 +894,10 @@ export class HeapSnapshotObjectNode extends HeapSnapshotGenericObjectNode {
   constructor(
       dataGrid: HeapSnapshotSortableDataGrid, snapshot: HeapSnapshotModel.HeapSnapshotProxy.HeapSnapshotProxy,
       edge: HeapSnapshotModel.HeapSnapshotModel.Edge, parentObjectNode: HeapSnapshotObjectNode|null) {
-    super(dataGrid, edge.node);
+    if (!edge.targetNode) {
+      throw new Error('HeapSnapshotObjectNode requires a target node');
+    }
+    super(dataGrid, edge.targetNode);
     this.referenceName = edge.name;
     this.referenceType = edge.type;
     this.edgeIndex = edge.edgeIndex;
@@ -850,9 +948,12 @@ export class HeapSnapshotObjectNode extends HeapSnapshotGenericObjectNode {
   }
 
   override createChildNode(item: HeapSnapshotModel.HeapSnapshotModel.Node|HeapSnapshotModel.HeapSnapshotModel.Edge):
-      HeapSnapshotObjectNode {
-    return new HeapSnapshotObjectNode(
-        this.dataGridInternal, this.snapshot, (item as HeapSnapshotModel.HeapSnapshotModel.Edge), this);
+      HeapSnapshotGridNode {
+    const edge = item as HeapSnapshotModel.HeapSnapshotModel.Edge;
+    if (edge.value) {
+      return new HeapSnapshotValueNode(this.dataGridInternal, edge);
+    }
+    return new HeapSnapshotObjectNode(this.dataGridInternal, this.snapshot, edge, this);
   }
 
   override getHash(): number {
@@ -920,8 +1021,12 @@ export class HeapSnapshotRetainingObjectNode extends HeapSnapshotObjectNode {
   constructor(
       dataGrid: HeapSnapshotSortableDataGrid, snapshot: HeapSnapshotModel.HeapSnapshotProxy.HeapSnapshotProxy,
       edge: HeapSnapshotModel.HeapSnapshotModel.Edge, parentRetainingObjectNode: HeapSnapshotRetainingObjectNode|null) {
+    const targetNode = edge.targetNode;
+    if (!targetNode) {
+      throw new Error('HeapSnapshotRetainingObjectNode requires a target node');
+    }
     super(dataGrid, snapshot, edge, parentRetainingObjectNode);
-    this.#ignored = edge.node.ignored;
+    this.#ignored = targetNode.ignored;
     if (this.#ignored) {
       this.data['distance'] = i18nString(UIStrings.ignored);
     }
@@ -935,9 +1040,12 @@ export class HeapSnapshotRetainingObjectNode extends HeapSnapshotObjectNode {
   }
 
   override createChildNode(item: HeapSnapshotModel.HeapSnapshotModel.Node|HeapSnapshotModel.HeapSnapshotModel.Edge):
-      HeapSnapshotRetainingObjectNode {
-    return new HeapSnapshotRetainingObjectNode(
-        this.dataGridInternal, this.snapshot, (item as HeapSnapshotModel.HeapSnapshotModel.Edge), this);
+      HeapSnapshotGridNode {
+    const edge = item as HeapSnapshotModel.HeapSnapshotModel.Edge;
+    if (edge.value) {
+      return new HeapSnapshotValueNode(this.dataGridInternal, edge);
+    }
+    return new HeapSnapshotRetainingObjectNode(this.dataGridInternal, this.snapshot, edge, this);
   }
 
   override edgeNodeSeparator(): string {
@@ -1061,9 +1169,12 @@ export class HeapSnapshotInstanceNode extends HeapSnapshotGenericObjectNode {
   }
 
   override createChildNode(item: HeapSnapshotModel.HeapSnapshotModel.Node|HeapSnapshotModel.HeapSnapshotModel.Edge):
-      HeapSnapshotObjectNode {
-    return new HeapSnapshotObjectNode(
-        this.dataGridInternal, this.baseSnapshotOrSnapshot, (item as HeapSnapshotModel.HeapSnapshotModel.Edge), null);
+      HeapSnapshotGridNode {
+    const edge = item as HeapSnapshotModel.HeapSnapshotModel.Edge;
+    if (edge.value) {
+      return new HeapSnapshotValueNode(this.dataGridInternal, edge);
+    }
+    return new HeapSnapshotObjectNode(this.dataGridInternal, this.baseSnapshotOrSnapshot, edge, null);
   }
 
   override getHash(): number {

@@ -96,15 +96,34 @@ export class Node {
 
 export class Edge {
   name: string;
-  node: Node;
+  node: Node|null;
+  targetNode: Node|null;
   type: string;
   edgeIndex: number;
+  value: EdgeValue|null;
   isAddedNotRemoved: boolean|null = null;
-  constructor(name: string, node: Node, type: string, edgeIndex: number) {
+  constructor(name: string, target: Node|EdgeValue, type: string, edgeIndex: number) {
     this.name = name;
-    this.node = node;
+    if (target instanceof Node) {
+      this.node = target;
+      this.targetNode = target;
+      this.value = null;
+    } else {
+      this.node = null;
+      this.targetNode = null;
+      this.value = target;
+    }
     this.type = type;
     this.edgeIndex = edgeIndex;
+  }
+}
+
+export class EdgeValue {
+  type: string;
+  value: string;
+  constructor(type: string, value: string) {
+    this.type = type;
+    this.value = value;
   }
 }
 

@@ -21,16 +21,20 @@ describe('HeapSnapshot', () => {
         node_types: Array<string[]|string>,
         edge_fields: string[],
         edge_types: Array<string[]|string>,
+        value_fields?: string[],
+        value_types?: Array<string[]|string>,
         location_fields?: string[],
         trace_function_info_fields?: string[],
         trace_node_fields?: string[],
       },
       node_count: number,
       edge_count: number,
+      value_count?: number,
       trace_function_count?: number,
     };
     nodes: number[]|Uint32Array;
     edges: number[]|Uint32Array;
+    values?: Array<number|string>;
     trace_function_infos?: number[]|Uint32Array;
     trace_tree?: unknown[];
     locations?: number[];
@@ -42,12 +46,15 @@ describe('HeapSnapshot', () => {
   interface SerializationTarget {
     nodes: number[];
     edges: number[];
+    values: Array<number|string>;
     snapshot: {
       meta: {
         node_fields: string[],
         node_types: Array<string[]|string>,
         edge_fields: string[],
         edge_types: Array<string[]|string>,
+        value_fields?: string[],
+        value_types?: Array<string[]|string>,
       },
       edge_count?: number,
       node_count?: number,
@@ -128,6 +135,7 @@ describe('HeapSnapshot', () => {
     if (mock.trace_function_infos) {
       mock.trace_function_infos = new MockArray(mock.trace_function_infos as number[]);
     }
+    mock.values = mock.values || [];
     return mock as unknown as HeapSnapshotWorker.HeapSnapshot.Profile;
   }
 
@@ -164,6 +172,56 @@ describe('HeapSnapshot', () => {
 
       strings: ['', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'M', 'N', 'Window', 'native']
     });
+  }
+
+  function createHeapSnapshotMockWithValueEdgeRaw(): RawMock {
+    return {
+      snapshot: {
+        meta: {
+          node_fields: ['type', 'name', 'id', 'self_size', 'retained_size', 'dominator', 'edge_count'],
+          node_types: [['hidden', 'object', 'synthetic'], 'string', 'number', 'number', 'number', 'number', 'number'],
+          edge_fields: ['type', 'name_or_index', 'to_node'],
+          edge_types: [['property', 'shortcut'], 'string_or_number', 'node_or_value'],
+          value_fields: ['type', 'value'],
+          value_types: [['int', 'bool', 'double', 'string', 'smi'], 'string'],
+          location_fields: ['object_index', 'script_id', 'line', 'column'],
+        },
+        node_count: 2,
+        edge_count: 2,
+        value_count: 1,
+      },
+      nodes: [
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        3,
+        10,
+        0,
+        0,
+        1,
+      ],
+      edges: [
+        1,
+        2,
+        7,
+        0,
+        3,
+        14,
+      ],
+      values: [0, '42'],
+      locations: [],
+      strings: ['', 'Holder', 'holder', 'answer'],
+    };
+  }
+
+  function createHeapSnapshotMockWithValueEdge() {
+    return postprocessHeapSnapshotMock(createHeapSnapshotMockWithValueEdgeRaw());
   }
 
   class HeapNode {
@@ -317,6 +375,7 @@ describe('HeapSnapshot', () => {
 
         nodes: [],
         edges: [],
+        values: [],
         locations: [],
         strings: []
       };
@@ -674,6 +733,22 @@ describe('HeapSnapshot', () => {
     assert.strictEqual(names.join(','), 'b', 'edges provider names');
   });
 
+  it('heapSnapshotValueEdgesProvider', async () => {
+    const snapshot =
+        await HeapSnapshotWorker.HeapSnapshot.createJSHeapSnapshotForTesting(createHeapSnapshotMockWithValueEdge());
+
+    const provider = snapshot.createEdgesProvider(7);
+    provider.sortAndRewind({fieldName1: '!edgeName', ascending1: true, fieldName2: 'retainedSize', ascending2: false});
+    const range = provider.serializeItemsRange(0, 10);
+    assert.strictEqual(range.totalLength, 1, 'Edge range total length');
+    const edge = range.items[0] as HeapSnapshotModel.HeapSnapshotModel.Edge;
+    assert.strictEqual(edge.type, 'property');
+    assert.strictEqual(edge.name, 'answer');
+    assert.strictEqual(edge.value?.type, 'int');
+    assert.strictEqual(edge.value?.value, '42');
+    assert.isNull(edge.targetNode);
+  });
+
   it('heapSnapshotLoader', async () => {
     const source = createHeapSnapshotMockRaw();
     const sourceStringified = JSON.stringify(source);
@@ -703,5 +778,30 @@ describe('HeapSnapshot', () => {
     };
 
     assert.strictEqual(JSON.stringify(referenceToCompare), JSON.stringify(resultToCompare));
+  });
+
+  it('heapSnapshotLoaderWithValueTable', async () => {
+    const source = createHeapSnapshotMockWithValueEdgeRaw();
+    const sourceStringified = JSON.stringify(source);
+    const partSize = sourceStringified.length >> 3;
+
+    const dispatcher = new HeapSnapshotWorker.HeapSnapshotWorkerDispatcher.HeapSnapshotWorkerDispatcher(() => {});
+    const loader = new HeapSnapshotWorker.HeapSnapshotLoader.HeapSnapshotLoader(dispatcher);
+    for (let i = 0, l = sourceStringified.length; i < l; i += partSize) {
+      loader.write(sourceStringified.slice(i, i + partSize));
+    }
+    loader.close();
+    await loader.parsingComplete;
+    const channel = new MessageChannel();
+    new HeapSnapshotWorker.HeapSnapshot.SecondaryInitManager(channel.port2);
+    const result = await loader.buildSnapshot(channel.port1);
+    channel.port1.close();
+    channel.port2.close();
+
+    const provider = result.createEdgesProvider(7);
+    const range = provider.serializeItemsRange(0, 10);
+    const edge = range.items[0] as HeapSnapshotModel.HeapSnapshotModel.Edge;
+    assert.strictEqual(edge.value?.type, 'int');
+    assert.strictEqual(edge.value?.value, '42');
   });
 });

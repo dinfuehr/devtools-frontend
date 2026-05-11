@@ -169,6 +169,55 @@ export class HeapSnapshotLoader {
     return result;
   }
 
+  async #parseJsonArray(name: string, title: string): Promise<unknown[]> {
+    const nameIndex = await this.#findToken(name);
+    const bracketIndex = await this.#findToken('[', nameIndex);
+    this.#json = this.#json.slice(bracketIndex);
+    let arrayEndIndex = this.#jsonArrayEndIndex();
+    while (arrayEndIndex === -1) {
+      this.#progress.updateStatus(title);
+      this.#json += await this.#fetchChunk();
+      arrayEndIndex = this.#jsonArrayEndIndex();
+    }
+    const result = JSON.parse(this.#json.slice(0, arrayEndIndex));
+    this.#json = this.#json.slice(arrayEndIndex);
+    if (!Array.isArray(result)) {
+      throw new Error('Unable to parse ' + name);
+    }
+    return result;
+  }
+
+  #jsonArrayEndIndex(): number {
+    let index = 0;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    while (index < this.#json.length) {
+      const char = this.#json[index++];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (char === '"') {
+        inString = true;
+      } else if (char === '[') {
+        ++depth;
+      } else if (char === ']') {
+        --depth;
+        if (depth === 0) {
+          return index;
+        }
+      }
+    }
+    return -1;
+  }
+
   async #parseInput(): Promise<void> {
     const snapshotToken = '"snapshot"';
     const snapshotTokenIndex = await this.#findToken(snapshotToken);
@@ -201,6 +250,12 @@ export class HeapSnapshotLoader {
         '"edges"', 'Loading edges… {PH1}%',
         this.#snapshot.snapshot.meta.edge_fields.length * this.#snapshot.snapshot.edge_count);
     this.#snapshot.edges = edges;
+
+    if (this.#snapshot.snapshot.meta.value_fields) {
+      this.#snapshot.values = await this.#parseJsonArray('"values"', 'Loading values…');
+    } else {
+      this.#snapshot.values = [];
+    }
 
     if (this.#snapshot.snapshot.trace_function_count) {
       const traceFunctionInfos = await this.#parseArray(
