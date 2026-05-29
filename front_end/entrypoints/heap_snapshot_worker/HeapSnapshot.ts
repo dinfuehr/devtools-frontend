@@ -8,6 +8,7 @@ import * as i18n from '../../core/i18n/i18n.js';
 import type * as PlatformApi from '../../core/platform/api/api.js';
 import * as Platform from '../../core/platform/platform.js';
 import * as HeapSnapshotModel from '../../models/heap_snapshot/heap_snapshot.js';
+import type {RetainingEdge, RetainingPaths} from '../../models/heap_snapshot/HeapSnapshotModel.js';
 
 import {AllocationProfile} from './AllocationProfile.js';
 import type {HeapSnapshotWorkerDispatcher} from './HeapSnapshotWorkerDispatcher.js';
@@ -2816,6 +2817,145 @@ export abstract class HeapSnapshot {
     const filter = this.retainingEdgesFilter();
     const indexProvider = new HeapSnapshotRetainerEdgeIndexProvider(this);
     return new HeapSnapshotEdgesProvider(this, filter, node.retainers(), indexProvider);
+  }
+
+  getRetainingPaths(
+      nodeIndex: number,
+      maxDepth = 30,
+      maxNodes = 5000,
+      maxSiblings = 100,
+      ): RetainingPaths {
+    const nodeFieldCount = this.nodeFieldCount;
+    const firstRetainerIndex = this.firstRetainerIndex;
+    const retainingNodes = this.retainingNodes;
+    const retainingEdges = this.retainingEdges;
+    const distances = this.#nodeDistancesForRetainersView ?? this.nodeDistances;
+    const edgeTypeOffset = this.edgeTypeOffset;
+    const edgeWeakType = this.edgeWeakType;
+    const containmentEdges = this.containmentEdges;
+    let traversedNodesCount = 0;
+    const visiting = new Set<number>();
+    const visited = new Map<number, number>();
+    // Distance 0: Synthetic root, Distance 1: (GC roots), Distance 2: e.g. (Stack roots) or (Handle scope)
+    const rootDistance = 2;
+    const limitsReached: {depth?: boolean, nodes?: boolean, siblings?: boolean} = {};
+
+    const buildForest = (currentIndex: number, currentDepth: number): RetainingEdge[] => {
+      traversedNodesCount++;
+
+      if (traversedNodesCount > maxNodes) {
+        limitsReached.nodes = true;
+        return [];
+      }
+
+      if (currentDepth >= maxDepth) {
+        limitsReached.depth = true;
+        return [];
+      }
+
+      const ordinal = currentIndex / nodeFieldCount;
+      const currentDistance = distances[ordinal];
+
+      if (currentDistance <= rootDistance) {
+        return [];
+      }
+
+      if (visiting.has(currentIndex)) {
+        return [];
+      }
+
+      const cachedDepth = visited.get(currentIndex);
+      if (cachedDepth !== undefined) {
+        // Only revisit the node if the current depth is less than the cached depth. In that case we might now find a path to the root.
+        if (currentDepth >= cachedDepth) {
+          return [];
+        }
+      }
+
+      visiting.add(currentIndex);
+
+      const beginRetainerIndex = firstRetainerIndex[ordinal];
+      const endRetainerIndex = firstRetainerIndex[ordinal + 1];
+
+      const retainers: Array<{retainerIndex: number, dist: number, nodeIndex: number}> = [];
+
+      for (let retainerIndex = beginRetainerIndex; retainerIndex < endRetainerIndex; ++retainerIndex) {
+        const retainerNodeIndex = retainingNodes[retainerIndex];
+        const retainerNodeOrdinal = retainerNodeIndex / nodeFieldCount;
+        const dist = distances[retainerNodeOrdinal];
+
+        const globalEdgeIndex = retainingEdges[retainerIndex];
+        if (this.isEdgeIgnoredInRetainersView(globalEdgeIndex)) {
+          continue;
+        }
+
+        // Skip weak edges
+        const edgeType = containmentEdges.getValue(globalEdgeIndex + edgeTypeOffset);
+        if (edgeType === edgeWeakType) {
+          continue;
+        }
+
+        if (dist >= 0) {
+          const remainingDepth = maxDepth - currentDepth;
+          // Since recursion halts at rootDistance, the remaining edges to path termination is exactly dist - rootDistance.
+          const neededDepth = dist - rootDistance;
+          if (neededDepth < remainingDepth) {
+            retainers.push({retainerIndex, dist, nodeIndex: retainerNodeIndex});
+          }
+        }
+      }
+
+      // Sort retainers by distance (shortest to GC roots first)
+      retainers.sort((a, b) => a.dist - b.dist);
+
+      if (retainers.length > maxSiblings) {
+        limitsReached.siblings = true;
+      }
+      const selectedRetainers = retainers.slice(0, maxSiblings);
+      const forest: RetainingEdge[] = [];
+
+      for (const retainer of selectedRetainers) {
+        const edge = this.createRetainingEdge(retainer.retainerIndex);
+        const globalEdgeIndex = retainingEdges[retainer.retainerIndex];
+
+        const isRoot = retainer.dist === rootDistance;
+        let children: RetainingEdge[] = [];
+
+        if (isRoot) {
+          traversedNodesCount++;
+
+          if (traversedNodesCount > maxNodes) {
+            limitsReached.nodes = true;
+            break;
+          }
+        } else {
+          children = buildForest(retainer.nodeIndex, currentDepth + 1);
+          if (children.length === 0) {
+            continue;
+          }
+        }
+
+        const retainerNode = this.createNode(retainer.nodeIndex);
+        forest.push({
+          edgeIndex: globalEdgeIndex,
+          edgeName: edge.name(),
+          edgeType: edge.type(),
+          nodeId: retainerNode.id(),
+          nodeIndex: retainer.nodeIndex,
+          nodeName: retainerNode.name(),
+          distance: retainer.dist,
+          children,
+        });
+      }
+
+      visiting.delete(currentIndex);
+      visited.set(currentIndex, currentDepth);
+
+      return forest;
+    };
+
+    const paths = buildForest(nodeIndex, 0);
+    return {paths, limitsReached};
   }
 
   createAddedNodesProvider(baseSnapshotId: string, classKey: string): HeapSnapshotNodesProvider {
