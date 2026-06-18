@@ -303,3 +303,17 @@ export interface DominatorNode {
 }
 
 export type DominatorChain = DominatorNode[];
+
+export interface NativeContextSize {
+  ordinal: number;
+  nodeId: number;
+  nodeIndex: number;
+  nodeName: string;
+  attributedSize: number;
+}
+
+export interface NativeContextSizes {
+  nativeContexts: NativeContextSize[];
+  sharedSize: number;
+  noAttributionSize: number;
+}
