@@ -1448,11 +1448,11 @@ describe('HeapSnapshot', () => {
     nc2.linkNode(sharedObj, 'element');
 
     const snapshot = await builder.createJSHeapSnapshot();
-    const nc1Ordinal = snapshot.nodeIndexForId(10)! / snapshot.nodeFieldCount;
+    const nc1Index = snapshot.nodeIndexForId(10)!;
 
     // Filter for NC1
     const filter1 = new HeapSnapshotModel.HeapSnapshotModel.NodeFilter();
-    filter1.filterName = `nativeContext_${nc1Ordinal}`;
+    filter1.filterName = `nativeContext_${nc1Index}`;
     const aggregates1 = snapshot.aggregatesWithFilter(filter1);
     const indexes1 = new Set(Object.values(aggregates1).flatMap(a => a.idxs));
 

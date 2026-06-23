@@ -1518,7 +1518,8 @@ export abstract class HeapSnapshot {
         };
       default:
         if (filterName.startsWith('nativeContext_')) {
-          const targetOrdinal = parseInt(filterName.substring('nativeContext_'.length), 10);
+          const targetNodeIndex = Number(filterName.substring('nativeContext_'.length));
+          const targetOrdinal = targetNodeIndex / this.nodeFieldCount;
           return (node: HeapSnapshotNode) => {
             const ordinal = node.nodeIndex / this.nodeFieldCount;
             return this.nodeNativeContextAttribution[ordinal] === targetOrdinal;
@@ -2450,7 +2451,7 @@ export abstract class HeapSnapshot {
         attribution[ordinal] = ordinal;
         isFixed.setBit(ordinal);
       } else {
-        let owner = this.inferFixedNativeContextForOrdinal(ordinal, edgeTargets);
+        const owner = this.inferFixedNativeContextForOrdinal(ordinal, edgeTargets);
         if (owner >= 0) {
           attribution[ordinal] = owner;
           isFixed.setBit(ordinal);
