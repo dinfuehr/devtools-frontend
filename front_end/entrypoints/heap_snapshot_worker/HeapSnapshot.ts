@@ -2445,22 +2445,23 @@ export abstract class HeapSnapshot {
     const edgeTargets = this.buildInitEdgeTargets();
     const nativeContextOrdinals: number[] = [];
     for (let ordinal = 0; ordinal < this.nodeCount; ordinal++) {
-      let owner = NO_NATIVE_CONTEXT;
       if (this.isNativeContext(ordinal)) {
-        owner = ordinal;
         nativeContextOrdinals.push(ordinal);
-      } else {
-        owner = this.inferFixedNativeContextForOrdinal(ordinal, edgeTargets);
-      }
-      if (owner >= 0) {
-        attribution[ordinal] = owner;
+        attribution[ordinal] = ordinal;
         isFixed.setBit(ordinal);
+      } else {
+        let owner = this.inferFixedNativeContextForOrdinal(ordinal, edgeTargets);
+        if (owner >= 0) {
+          attribution[ordinal] = owner;
+          isFixed.setBit(ordinal);
+        }
       }
     }
 
     // Propagate the fixed native context attributions to the rest of the nodes based on reachability.
     this.propagateNativeContextAttribution(attribution, isFixed);
     this.nodeNativeContextAttribution = attribution;
+    // Sum up sizes for native contexts.
     this.#nativeContextSizes = this.computeNativeContextAttributionSizes(nativeContextOrdinals);
   }
 
