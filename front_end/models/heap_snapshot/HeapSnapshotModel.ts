@@ -317,3 +317,22 @@ export interface DuplicateStringGroup {
   }>;
   truncated?: boolean;
 }
+
+export const enum DOMLinkState {
+  UNKNOWN = 0,
+  ATTACHED = 1,
+  DETACHED = 2,
+}
+
+export interface ObjectInfo {
+  id: number;
+  name: string;
+  type: string;
+  nodeIndex: number;
+  detachedness: DOMLinkState;
+  selfSize: number;
+  retainedSize: number;
+  distance: number;
+  edgeCount: number;
+  retainerCount: number;
+}
