@@ -316,4 +316,6 @@ export interface DuplicateStringGroup {
     distance: number,
   }>;
   truncated?: boolean;
+  length?: number;
+  hash?: number;
 }

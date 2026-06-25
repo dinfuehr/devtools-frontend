@@ -567,6 +567,31 @@ export class HeapSnapshotNode implements HeapSnapshotItem {
     return undefined;
   }
 
+  nodeValueAsInt(): number|undefined {
+    if (this.rawType() !== this.snapshot.nodeNumberType) {
+      return undefined;
+    }
+    if (this.rawName() !== 'int') {
+      return undefined;
+    }
+    const valNode = this.findInternalEdgeTarget('value');
+    if (!valNode) {
+      return undefined;
+    }
+    const value = parseInt(valNode.rawName(), 10);
+    return isNaN(value) ? undefined : value;
+  }
+
+  nodeStringLength(): number|undefined {
+    const lengthNode = this.findInternalEdgeTarget('length');
+    return lengthNode ? lengthNode.nodeValueAsInt() : undefined;
+  }
+
+  nodeStringHash(): number|undefined {
+    const hashNode = this.findInternalEdgeTarget('hash');
+    return hashNode ? hashNode.nodeValueAsInt() : undefined;
+  }
+
   nodeIsTruncatedString(): boolean {
     const truncNode = this.findInternalEdgeTarget('truncated');
     if (!truncNode) {
@@ -1366,7 +1391,13 @@ export abstract class HeapSnapshot {
 
   getDuplicateStrings(): HeapSnapshotModel.HeapSnapshotModel.DuplicateStringGroup[] {
     const filter = this.createNamedFilter('duplicatedStrings');
-    const groupsMap = new Map<string, HeapSnapshotModel.HeapSnapshotModel.DuplicateStringGroup>();
+    const normalGroups = new Map<string, HeapSnapshotModel.HeapSnapshotModel.DuplicateStringGroup>();
+
+    interface TruncatedGroup extends HeapSnapshotModel.HeapSnapshotModel.DuplicateStringGroup {
+      length?: number;
+      hash?: number;
+    }
+    const truncatedGroups = new Map<string, TruncatedGroup[]>();
     const node = this.createNode(0);
 
     for (let i = 0; i < this.nodeCount; ++i) {
@@ -1375,39 +1406,69 @@ export abstract class HeapSnapshot {
         const name = node.name();
         const truncated = node.nodeIsTruncatedString();
 
-        // Note that there is exactly one group for each duplicated string value. So
-        // truncated strings might end up in the same group as non-truncated strings if the
-        // prefix matches the non-truncated string. This should be unlikely though and we
-        // don't handle this here to avoid that additional complexity.
-        let group = groupsMap.get(name);
-        if (!group) {
-          group = {
-            value: name,
-            count: 0,
-            totalSelfSize: 0,
-            totalRetainedSize: 0,
-            nodes: [],
-            truncated,
-          };
-          groupsMap.set(name, group);
-        } else if (truncated) {
-          // Make sure the truncated flag is set in case the group was initially created by a
-          // non-truncated string.
-          group.truncated = true;
+        if (truncated) {
+          const length = node.nodeStringLength();
+          const hash = node.nodeStringHash();
+          let groups = truncatedGroups.get(name);
+          if (!groups) {
+            groups = [];
+            truncatedGroups.set(name, groups);
+          }
+          let group = groups.find(g => g.length === length && g.hash === hash);
+          if (!group) {
+            group = {
+              value: name,
+              count: 0,
+              totalSelfSize: 0,
+              totalRetainedSize: 0,
+              nodes: [],
+              truncated: true,
+              length,
+              hash,
+            };
+            groups.push(group);
+          }
+          group.count++;
+          group.totalSelfSize += node.selfSize();
+          group.totalRetainedSize += node.retainedSize();
+          group.nodes.push({
+            id: node.id(),
+            selfSize: node.selfSize(),
+            retainedSize: node.retainedSize(),
+            distance: node.distance(),
+          });
+        } else {
+          let group = normalGroups.get(name);
+          if (!group) {
+            group = {
+              value: name,
+              count: 0,
+              totalSelfSize: 0,
+              totalRetainedSize: 0,
+              nodes: [],
+              truncated: false,
+            };
+            normalGroups.set(name, group);
+          }
+          group.count++;
+          group.totalSelfSize += node.selfSize();
+          group.totalRetainedSize += node.retainedSize();
+          group.nodes.push({
+            id: node.id(),
+            selfSize: node.selfSize(),
+            retainedSize: node.retainedSize(),
+            distance: node.distance(),
+          });
         }
-        group.count++;
-        group.totalSelfSize += node.selfSize();
-        group.totalRetainedSize += node.retainedSize();
-        group.nodes.push({
-          id: node.id(),
-          selfSize: node.selfSize(),
-          retainedSize: node.retainedSize(),
-          distance: node.distance(),
-        });
       }
     }
 
-    return Array.from(groupsMap.values()).sort((a, b) => b.totalRetainedSize - a.totalRetainedSize);
+    const allGroups: HeapSnapshotModel.HeapSnapshotModel.DuplicateStringGroup[] = [
+      ...normalGroups.values(),
+      ...Array.from(truncatedGroups.values()).flat(),
+    ];
+
+    return allGroups.sort((a, b) => b.totalRetainedSize - a.totalRetainedSize);
   }
 
   private createNodeIdFilter(minNodeId: number, maxNodeId: number): (arg0: HeapSnapshotNode) => boolean {
@@ -1498,7 +1559,9 @@ export abstract class HeapSnapshot {
         markUnreachableNodes();
         return (node: HeapSnapshotNode) => !getBit(node);
       case 'duplicatedStrings': {
-        const stringToNodeIndexMap = new Map<string, number>();
+        const normalStringToNodeIndexMap = new Map<string, number>();
+        const truncatedStringToNodeIndexesMap =
+            new Map<string, Array<{nodeIndex: number, length?: number, hash?: number}>>();
         const node = this.createNode(0);
         for (let i = 0; i < this.nodeCount; ++i) {
           node.nodeIndex = i * this.nodeFieldCount;
@@ -1512,13 +1575,34 @@ export abstract class HeapSnapshot {
             if (node.isFlatConsString()) {
               continue;
             }
+            if (node.selfSize() === 0) {
+              continue;
+            }
             const name = node.name();
-            const alreadyVisitedNodeIndex = stringToNodeIndexMap.get(name);
-            if (alreadyVisitedNodeIndex === undefined) {
-              stringToNodeIndexMap.set(name, node.nodeIndex);
+            const truncated = node.nodeIsTruncatedString();
+            if (truncated) {
+              const length = node.nodeStringLength();
+              const hash = node.nodeStringHash();
+              let entries = truncatedStringToNodeIndexesMap.get(name);
+              if (!entries) {
+                entries = [];
+                truncatedStringToNodeIndexesMap.set(name, entries);
+              }
+              const match = entries.find(e => e.length === length && e.hash === hash);
+              if (match) {
+                bitmap.setBit(match.nodeIndex / this.nodeFieldCount);
+                bitmap.setBit(node.nodeIndex / this.nodeFieldCount);
+              } else {
+                entries.push({nodeIndex: node.nodeIndex, length, hash});
+              }
             } else {
-              bitmap.setBit(alreadyVisitedNodeIndex / this.nodeFieldCount);
-              bitmap.setBit(node.nodeIndex / this.nodeFieldCount);
+              const alreadyVisitedNodeIndex = normalStringToNodeIndexMap.get(name);
+              if (alreadyVisitedNodeIndex === undefined) {
+                normalStringToNodeIndexMap.set(name, node.nodeIndex);
+              } else {
+                bitmap.setBit(alreadyVisitedNodeIndex / this.nodeFieldCount);
+                bitmap.setBit(node.nodeIndex / this.nodeFieldCount);
+              }
             }
           }
         }
