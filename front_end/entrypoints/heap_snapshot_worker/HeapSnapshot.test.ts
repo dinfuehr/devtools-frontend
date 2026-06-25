@@ -1298,8 +1298,6 @@ describe('HeapSnapshot', () => {
       retainerCount: 1,
     });
 
-    // Invalid index
-    const invalidInfo = snapshot.getObjectInfo(5);
-    assert.isNull(invalidInfo);
+    assert.throws(() => snapshot.getObjectInfo(5), 'Invalid nodeIndex 5');
   });
 });

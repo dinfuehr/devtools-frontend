@@ -1122,11 +1122,12 @@ export abstract class HeapSnapshot {
     return undefined;
   }
 
-  getObjectInfo(nodeIndex: number): HeapSnapshotModel.HeapSnapshotModel.ObjectInfo|null {
+  getObjectInfo(nodeIndex: number): HeapSnapshotModel.HeapSnapshotModel.ObjectInfo {
     const nodesLength = this.nodes.length;
     const nodeFieldCount = this.nodeFieldCount;
-    if (nodeIndex < 0 || nodeIndex >= nodesLength || nodeIndex % nodeFieldCount !== 0) {
-      return null;
+    if (!Number.isInteger(nodeIndex) || nodeIndex < 0 || nodeIndex >= nodesLength ||
+        nodeIndex % nodeFieldCount !== 0) {
+      throw new Error('Invalid nodeIndex ' + nodeIndex);
     }
     const node = this.createNode(nodeIndex);
     return {
