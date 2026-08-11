@@ -47,6 +47,7 @@ devtools_entrypoint("bundle") {
     "../../core/sdk/*",
     "../../panels/sources/*",
     "../../ui/legacy/components/source_frame",
+    "../heap_snapshot_worker/*",
   ]
 
   visibility += devtools_entrypoints_visibility

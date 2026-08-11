@@ -22,6 +22,7 @@ devtools_foundation_module("heap_snapshot_worker") {
     "../../core/platform/api:bundle",
     "../../core/text_utils:bundle",
     "../../models/heap_snapshot:bundle",
+    "../formatter_worker:bundle",
   ]
 }
 
@@ -64,5 +65,6 @@ devtools_foundation_module("unittests") {
   deps = [
     ":bundle",
     "../../models/heap_snapshot:bundle",
+    "../formatter_worker:bundle",
   ]
 }

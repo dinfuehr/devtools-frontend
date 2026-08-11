@@ -363,6 +363,61 @@ export interface ObjectInfo {
   retainerCount: number;
 }
 
+export interface ContextAnalysisResult {
+  /** Scopes with dead fields, sorted by their highest-ranked context. */
+  scopes: ScopeAnalysis[];
+  unmatchedContexts: UnmatchedContext[];
+}
+
+export interface ScopeAnalysis {
+  scopeInfoNodeIndex: number;
+  scopeInfoNodeId: number;
+  scriptId: number;
+  scriptNodeId: number;
+  scriptName: string;
+  /** Source name of the scope, when available. */
+  scopeName?: string;
+  scopeStart: number;
+  scopeEnd: number;
+  /** Number of context-typed fields in each context belonging to this scope. */
+  contextFieldCount: number;
+  /** Contexts with dead fields, sorted descending by deadFieldsRetainedSizeSum. */
+  contexts: ContextAnalysis[];
+}
+
+export interface ContextAnalysis {
+  contextNodeIndex: number;
+  contextNodeId: number;
+  retainedSize: number;
+  /**
+   * The sum of the retained sizes of values in fields classified as dead.
+   * This is a ranking heuristic, not the number of bytes that would be
+   * reclaimed by clearing the fields.
+   */
+  deadFieldsRetainedSizeSum: number;
+  /** Fields classified as dead in this context, sorted descending by retainedSize. */
+  deadFields: ContextField[];
+}
+
+export interface ContextField {
+  name: string;
+  valueNodeIndex: number;
+  valueNodeId: number;
+  valueName: string;
+  valueType: string;
+  selfSize: number;
+  retainedSize: number;
+}
+
+export interface UnmatchedContext {
+  contextNodeIndex: number;
+  contextNodeId: number;
+  reason: UnmatchedContextReason;
+}
+
+export type UnmatchedContextReason = 'missing-scope-info'|'missing-scope-position'|'missing-script'|'missing-source'|
+    'unparseable-source'|'missing-source-scope';
+
 export interface HeapQueryOptions {
   className?: string;
   propertyName?: string;
