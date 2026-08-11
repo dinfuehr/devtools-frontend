@@ -281,6 +281,7 @@ group("foundation_unittests") {
     "core/text_utils:unittests",
     "entrypoints/formatter_worker:unittests",
     "entrypoints/heap_snapshot_worker:unittests",
+    "entrypoints/heap_snapshot_worker/fixtures",
     "foundation:unittests",
     "models/ai_assistance:foundation_unittests",
     "models/ai_code_completion:foundation_unittests",

@@ -58,6 +58,8 @@ export default defineConfig([
     'scripts/build/typescript/tests',
     'scripts/migration/**/*.js',
     'scripts/protocol_typescript/*.js',
+    // These fixtures are executed by d8 and can contain V8-specific syntax.
+    'front_end/entrypoints/heap_snapshot_worker/fixtures/',
     'scripts/deps/tests/fixtures',
     'test/**/fixtures/',
     'test/e2e/**/*.js',

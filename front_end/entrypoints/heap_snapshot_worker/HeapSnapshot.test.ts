@@ -29,6 +29,9 @@ describe('HeapSnapshot', () => {
         location_fields?: string[],
         trace_function_info_fields?: string[],
         trace_node_fields?: string[],
+        scope_fields?: string[],
+        scope_context_var_fields?: string[],
+        scope_use_fields?: string[],
       },
       node_count: number,
       edge_count: number,
@@ -1982,6 +1985,543 @@ describe('HeapSnapshot', () => {
     });
 
     assert.throws(() => snapshot.getObjectInfo(5), 'Invalid nodeIndex 5');
+  });
+
+  describe('reports why contexts cannot be correlated with source scopes', () => {
+    function addIntEdge(parent: HeapNode, name: string, value: number) {
+      const intNode = new HeapNode('int', 0, 'number');
+      parent.linkNode(intNode, 'internal', name);
+      intNode.linkNode(new HeapNode(String(value), 0, 'string'), 'internal', 'value');
+    }
+
+    interface EmbeddedScopeMock {
+      scopeId: number;
+      depth?: number;
+      contextVars?: string[];
+      uses?: Array<{declaringScopeId: number, slotIndex: number}>;
+    }
+
+    interface ContextSnapshotOptions {
+      scopeId?: number;
+      startPosition?: number;
+      endPosition?: number;
+      scopeName?: string;
+      contextFields?: Array<{name: string, value: string, type?: string}>;
+      includeContextWithoutScopeInfo?: boolean;
+      omitScopeInfoScopeId?: boolean;
+      omitSfiScript?: boolean;
+      embeddedScopes?: EmbeddedScopeMock[];
+    }
+
+    async function createContextSnapshot(options: ContextSnapshotOptions = {}) {
+      const {
+        scopeId = 100,
+        startPosition = 14,
+        endPosition = 67,
+        scopeName = 'outer',
+        contextFields,
+        includeContextWithoutScopeInfo = true,
+        omitScopeInfoScopeId = false,
+        omitSfiScript = false,
+        embeddedScopes,
+      } = options;
+
+      const builder = new HeapSnapshotBuilder();
+      const script = new HeapNode('system / Script / test.js', 0, 'code', 301);
+      builder.rootNode.linkNode(script, 'element');
+      addIntEdge(script, 'id', 7);
+
+      const sharedFunctionInfo = new HeapNode('system / SharedFunctionInfo / outer', 0, 'code', 302);
+      builder.rootNode.linkNode(sharedFunctionInfo, 'element');
+      const outerScopeInfo = new HeapNode('system / ScopeInfo', 0, 'code', 303);
+      sharedFunctionInfo.linkNode(outerScopeInfo, 'internal', 'name_or_scope_info');
+      if (!omitSfiScript) {
+        sharedFunctionInfo.linkNode(script, 'internal', 'script');
+      }
+      if (!omitScopeInfoScopeId) {
+        addIntEdge(outerScopeInfo, 'scope_id', scopeId);
+      }
+      addIntEdge(outerScopeInfo, 'start_position', startPosition);
+      addIntEdge(outerScopeInfo, 'end_position', endPosition);
+      outerScopeInfo.linkNode(new HeapNode(scopeName, 0, 'string'), 'internal', 'function_name');
+
+      const contextWithScopeInfo =
+          new HeapNode('system / Context / test', contextFields ? contextFields.length : 1, 'object', 101);
+      builder.rootNode.linkNode(contextWithScopeInfo, 'element');
+      contextWithScopeInfo.linkNode(outerScopeInfo, 'internal', 'scope_info');
+      if (contextFields) {
+        for (const field of contextFields) {
+          contextWithScopeInfo.linkNode(new HeapNode(field.value, 0, field.type ?? 'number'), 'context', field.name);
+        }
+      }
+
+      if (includeContextWithoutScopeInfo) {
+        const contextWithoutScopeInfo = new HeapNode('system / Context / missing', 0, 'object', 102);
+        builder.rootNode.linkNode(contextWithoutScopeInfo, 'element');
+      }
+
+      const rawSnapshot = builder.generateSnapshot();
+      if (embeddedScopes) {
+        const scriptOrdinal = builder.nodes.indexOf(script);
+        const scriptNodeIndex = scriptOrdinal * builder.nodeFieldsCount;
+
+        rawSnapshot.snapshot.meta.scope_fields = [
+          'script_node_index',
+          'scope_id',
+          'depth',
+          'scope_context_vars_count',
+          'scope_uses_count',
+        ];
+        rawSnapshot.snapshot.meta.scope_context_var_fields = ['name'];
+        rawSnapshot.snapshot.meta.scope_use_fields = ['declaring_scope_id', 'slot_index'];
+
+        const scopesArray: number[] = [];
+        const varsArray: number[] = [];
+        const usesArray: number[] = [];
+
+        for (const scope of embeddedScopes) {
+          const vars = scope.contextVars ?? [];
+          const uses = scope.uses ?? [];
+          scopesArray.push(
+              scriptNodeIndex,
+              scope.scopeId,
+              scope.depth ?? 0,
+              vars.length,
+              uses.length,
+          );
+          for (const varName of vars) {
+            varsArray.push(builder.lookupOrAddString(varName));
+          }
+          for (const use of uses) {
+            usesArray.push(use.declaringScopeId, use.slotIndex);
+          }
+        }
+
+        rawSnapshot.strings = builder.strings.slice();
+        (rawSnapshot as unknown as HeapSnapshotWorker.HeapSnapshot.Profile).scopes = scopesArray;
+        (rawSnapshot as unknown as HeapSnapshotWorker.HeapSnapshot.Profile).scope_context_vars = varsArray;
+        (rawSnapshot as unknown as HeapSnapshotWorker.HeapSnapshot.Profile).scope_uses = usesArray;
+      }
+
+      const parsedSnapshot = postprocessHeapSnapshotMock(rawSnapshot);
+      return await HeapSnapshotWorker.HeapSnapshot.createJSHeapSnapshotForTesting(parsedSnapshot);
+    }
+
+    it('ignores contexts without ScopeInfo', async () => {
+      const snapshot = await createContextSnapshot({
+        includeContextWithoutScopeInfo: true,
+        embeddedScopes: [{scopeId: 100, contextVars: []}],
+      });
+      const analysis = snapshot.analyzeContexts();
+      assert.isEmpty(analysis.scopes);
+      assert.isEmpty(analysis.scriptsWithoutScopes);
+    });
+
+    it('ignores ScopeInfo when scope_id is missing', async () => {
+      const snapshot = await createContextSnapshot({omitScopeInfoScopeId: true});
+      const analysis = snapshot.analyzeContexts();
+      assert.isEmpty(analysis.scopes);
+      assert.isEmpty(analysis.scriptsWithoutScopes);
+    });
+
+    it('ignores ScopeInfo when it cannot be mapped to a script', async () => {
+      const snapshot = await createContextSnapshot({omitSfiScript: true});
+      const analysis = snapshot.analyzeContexts();
+      assert.isEmpty(analysis.scopes);
+      assert.isEmpty(analysis.scriptsWithoutScopes);
+    });
+
+    it('ignores ScopeInfo when it has no matching embedded scope', async () => {
+      const snapshot = await createContextSnapshot({
+        scopeId: 100,
+        embeddedScopes: [{scopeId: 200, contextVars: []}],
+      });
+      const analysis = snapshot.analyzeContexts();
+      assert.isEmpty(analysis.scopes);
+      assert.isEmpty(analysis.scriptsWithoutScopes);
+    });
+
+    it('reports scripts without scopes when script has no embedded scopes', async () => {
+      const snapshot = await createContextSnapshot({
+        scopeId: 100,
+        includeContextWithoutScopeInfo: false,
+      });
+      const analysis = snapshot.analyzeContexts();
+      assert.isEmpty(analysis.scopes);
+      assert.deepEqual(analysis.scriptsWithoutScopes, [{
+                         scriptNodeIndex: snapshot.nodeIndexForId(301)!,
+                         scriptNodeId: 301,
+                         scriptName: 'test.js',
+                         contextCount: 1,
+                       }]);
+    });
+
+    it('ignores context fields missing from variable definitions', async () => {
+      const snapshot = await createContextSnapshot({
+        scopeId: 100,
+        embeddedScopes: [{scopeId: 100, contextVars: ['existingVar']}],
+        contextFields: [
+          {name: 'existingVar', value: '1'},
+          {name: 'missingVar', value: '2'},
+        ],
+      });
+      const analysis = snapshot.analyzeContexts();
+      assert.isEmpty(analysis.scriptsWithoutScopes);
+      assert.lengthOf(analysis.scopes, 1);
+      assert.deepEqual(analysis.scopes[0].contexts[0].deadFields.map(f => f.name), ['existingVar']);
+    });
+  });
+
+  async function loadContextFixture() {
+    let text: string;
+    const url = new URL('./fixtures/context-analysis.heapsnapshot', import.meta.url);
+    if (!('window' in globalThis)) {
+      const nodeFs = 'node:fs/promises';
+      const nodeUrl = 'node:url';
+      const fs = await import(nodeFs) as {readFile: (path: string, encoding: string) => Promise<string>};
+      const {fileURLToPath} = await import(nodeUrl) as {fileURLToPath: (url: URL) => string};
+      text = await fs.readFile(fileURLToPath(url), 'utf-8');
+    } else {
+      const snapshotResponse = await fetch(url);
+      if (!snapshotResponse.ok) {
+        throw new Error('Unable to load context fixture');
+      }
+      text = await snapshotResponse.text();
+    }
+
+    const profile = postprocessHeapSnapshotMock(JSON.parse(text) as RawMock);
+    return await HeapSnapshotWorker.HeapSnapshot.createJSHeapSnapshotForTesting(profile);
+  }
+
+  describe('analyze context fields', () => {
+    function matchesScriptName(scope: HeapSnapshotModel.HeapSnapshotModel.ScopeAnalysis, scriptName: string): boolean {
+      return scope.scriptName === scriptName || scope.scriptName.endsWith('/' + scriptName);
+    }
+
+    function scopesForScript(analysis: HeapSnapshotModel.HeapSnapshotModel.ContextAnalysisResult,
+                             scriptName: string): HeapSnapshotModel.HeapSnapshotModel.ScopeAnalysis[] {
+      const scopes = analysis.scopes.filter(scope => matchesScriptName(scope, scriptName));
+      assert.isNotEmpty(scopes, `No scopes found for ${scriptName}`);
+      return scopes;
+    }
+
+    function assertNoScopes(analysis: HeapSnapshotModel.HeapSnapshotModel.ContextAnalysisResult,
+                            scriptName: string): void {
+      const scopes = analysis.scopes.filter(scope => matchesScriptName(scope, scriptName));
+      assert.isEmpty(scopes, `Expected no scopes for ${scriptName}`);
+    }
+
+    function deadFieldNames(scope: HeapSnapshotModel.HeapSnapshotModel.ScopeAnalysis): string[][] {
+      return scope.contexts.map(context => context.deadFields.map(field => field.name).sort());
+    }
+
+    function allContextFields(snapshot: HeapSnapshotWorker.HeapSnapshot.JSHeapSnapshot,
+                              scope: HeapSnapshotModel.HeapSnapshotModel.ScopeAnalysis): string[] {
+      assert.isNotEmpty(scope.contexts);
+      const node = snapshot.createNode(scope.contexts[0].contextNodeIndex);
+      const fieldNames: string[] = [];
+      for (const edges = node.edges(); edges.hasNext(); edges.next()) {
+        const edge = edges.item();
+        if (edge.type() === 'context') {
+          fieldNames.push(edge.name());
+        }
+      }
+      return fieldNames.sort();
+    }
+
+    function scopeWithDeadField(scopes: HeapSnapshotModel.HeapSnapshotModel.ScopeAnalysis[],
+                                fieldName: string): HeapSnapshotModel.HeapSnapshotModel.ScopeAnalysis {
+      const matchingScopes = scopes.filter(
+          scope => scope.contexts.some(context => context.deadFields.some(field => field.name === fieldName)));
+      assert.lengthOf(matchingScopes, 1, `Expected exactly one scope with dead field '${fieldName}'`);
+      return matchingScopes[0];
+    }
+
+    it('populates node IDs and indices for scopes, contexts, and dead fields', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+
+      assert.isNotEmpty(analysis.scopes);
+      for (const scope of analysis.scopes) {
+        assert.isNotEmpty(scope.scriptName);
+        assert.strictEqual(snapshot.nodeIndexForId(scope.scopeInfoNodeId), scope.scopeInfoNodeIndex);
+        assert.strictEqual(snapshot.nodeIndexForId(scope.scriptNodeId), scope.scriptNodeIndex);
+        assert.isNotEmpty(scope.contexts);
+        for (const context of scope.contexts) {
+          assert.isNotEmpty(context.deadFields);
+          assert.strictEqual(snapshot.nodeIndexForId(context.contextNodeId), context.contextNodeIndex);
+          for (const deadField of context.deadFields) {
+            assert.strictEqual(snapshot.nodeIndexForId(deadField.valueNodeId), deadField.valueNodeIndex);
+          }
+        }
+      }
+      for (let index = 1; index < analysis.scopes.length; ++index) {
+        assert.isAtLeast(analysis.scopes[index - 1].contexts[0].deadFieldsRetainedSizeSum,
+                         analysis.scopes[index].contexts[0].deadFieldsRetainedSizeSum);
+      }
+    });
+
+    it('analyzes multiple contexts sharing a ScopeInfo', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'context.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['captured', 'dead']);
+      assert.deepEqual(deadFieldNames(scope), [['dead'], ['dead']]);
+    });
+
+    it('reports dead fields across nested context chains', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'nested.js');
+      assert.lengthOf(scopes, 2);
+      const outerScope = scopeWithDeadField(scopes, 'outerDead');
+      const innerScope = scopeWithDeadField(scopes, 'innerDead');
+
+      assert.deepEqual(allContextFields(snapshot, outerScope), ['outerCaptured', 'outerDead']);
+      assert.deepEqual(allContextFields(snapshot, innerScope), ['innerCaptured', 'innerDead']);
+      assert.deepEqual(deadFieldNames(outerScope), [['outerDead']]);
+      assert.deepEqual(deadFieldNames(innerScope), [['innerDead']]);
+      assert.notStrictEqual(outerScope.scopeInfoNodeIndex, innerScope.scopeInfoNodeIndex);
+    });
+
+    it('analyzes block-scoped fields in a block scope', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'block.js');
+      assert.lengthOf(scopes, 2);
+      const functionScope = scopeWithDeadField(scopes, 'functionDead');
+      const blockScope = scopeWithDeadField(scopes, 'blockDead');
+
+      assert.deepEqual(allContextFields(snapshot, functionScope), ['functionCaptured', 'functionDead']);
+      assert.deepEqual(allContextFields(snapshot, blockScope), ['blockCaptured', 'blockDead']);
+      assert.deepEqual(deadFieldNames(functionScope), [['functionDead']]);
+      assert.deepEqual(deadFieldNames(blockScope), [['blockDead']]);
+    });
+
+    it('analyzes variables used across block and inner scopes', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'block-variable.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['dead', 'paramCaptured']);
+      assert.deepEqual(deadFieldNames(scope), [['dead']]);
+    });
+
+    it('does not report variables used in local blocks inside an inner closure as dead', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      assertNoScopes(analysis, 'block-variable-inner.js');
+    });
+
+    it('analyzes contexts created for for-of block scopes', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'for-of.js');
+      assert.lengthOf(scopes, 2);
+      const iterationScope = scopeWithDeadField(scopes, 'item');
+      const bodyScope = scopeWithDeadField(scopes, 'dead');
+
+      assert.deepEqual(allContextFields(snapshot, iterationScope), ['item']);
+      assert.deepEqual(allContextFields(snapshot, bodyScope), ['captured', 'dead']);
+      assert.deepEqual(deadFieldNames(iterationScope), [['item'], ['item']]);
+      assert.deepEqual(deadFieldNames(bodyScope), [['dead'], ['dead']]);
+    });
+
+    it('classifies a field per context based on whether its reader closure is live', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'dead-closure.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['alwaysDead', 'usedOnlyByReader']);
+      assert.deepEqual(deadFieldNames(scope), [
+        ['alwaysDead', 'usedOnlyByReader'],
+        ['alwaysDead'],
+      ]);
+    });
+
+    it('accounts for an inner closure that a live closure can still instantiate', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'uninstantiated-inner.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['dead', 'usedByUninstantiatedInner']);
+      assert.deepEqual(deadFieldNames(scope), [['dead']]);
+    });
+
+    it('distinguishes shadowed fields belonging to different source scopes', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'shadowed.js');
+      assert.lengthOf(scopes, 2);
+      const outerScope = scopeWithDeadField(scopes, 'outerDead');
+      const innerScope = scopeWithDeadField(scopes, 'innerDead');
+
+      assert.deepEqual(allContextFields(snapshot, outerScope), ['outerDead', 'shadowed']);
+      assert.deepEqual(allContextFields(snapshot, innerScope), ['innerDead', 'shadowed']);
+      assert.deepEqual(deadFieldNames(outerScope), [['outerDead']]);
+      assert.deepEqual(deadFieldNames(innerScope), [['innerDead']]);
+    });
+
+    it('analyzes parameter and function-body contexts', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'parameter.js');
+      assert.lengthOf(scopes, 2);
+      const parameterScope = scopeWithDeadField(scopes, 'parameterDead');
+      const bodyScope = scopeWithDeadField(scopes, 'bodyDead');
+
+      assert.deepEqual(allContextFields(snapshot, parameterScope), ['parameterCaptured', 'parameterDead']);
+      assert.deepEqual(allContextFields(snapshot, bodyScope), ['bodyCaptured', 'bodyDead']);
+      assert.deepEqual(deadFieldNames(parameterScope), [['parameterDead']]);
+      assert.deepEqual(deadFieldNames(bodyScope), [['bodyDead']]);
+      assert.notStrictEqual(parameterScope.scopeInfoNodeIndex, bodyScope.scopeInfoNodeIndex);
+    });
+
+    it('analyzes closures created in class instance and static field initializers', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'class.js');
+      assert.lengthOf(scopes, 2);
+
+      const instanceScope = scopeWithDeadField(scopes, 'instanceDead');
+      const staticScope = scopeWithDeadField(scopes, 'staticDead');
+
+      assert.deepEqual(allContextFields(snapshot, instanceScope), ['instanceCaptured', 'instanceDead']);
+      assert.deepEqual(deadFieldNames(instanceScope), [['instanceDead']]);
+
+      assert.deepEqual(allContextFields(snapshot, staticScope), ['staticCaptured', 'staticDead']);
+      assert.deepEqual(deadFieldNames(staticScope), [['staticDead']]);
+      assert.notStrictEqual(instanceScope.scopeInfoNodeIndex, staticScope.scopeInfoNodeIndex);
+    });
+
+    it('analyzes class instance and static field initializers capturing outer context variables', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'class-direct.js');
+      assert.lengthOf(scopes, 2);
+
+      const instanceInitScope = scopeWithDeadField(scopes, 'instanceInitDead');
+      const staticInitScope = scopeWithDeadField(scopes, 'staticInitDead');
+
+      assert.deepEqual(allContextFields(snapshot, instanceInitScope), ['instanceInitCaptured', 'instanceInitDead']);
+      assert.deepEqual(deadFieldNames(instanceInitScope), [['instanceInitDead']]);
+
+      assert.deepEqual(allContextFields(snapshot, staticInitScope), ['staticInitDead', 'staticInitRegularDead']);
+      assert.deepEqual(deadFieldNames(staticInitScope), [['staticInitDead', 'staticInitRegularDead']]);
+      assert.notStrictEqual(instanceInitScope.scopeInfoNodeIndex, staticInitScope.scopeInfoNodeIndex);
+    });
+
+    it('analyzes closures created in class instance and static methods', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'class-methods.js');
+      assert.lengthOf(scopes, 2);
+
+      const instanceScope = scopeWithDeadField(scopes, 'instanceMethodDead');
+      const staticScope = scopeWithDeadField(scopes, 'staticMethodDead');
+
+      assert.deepEqual(allContextFields(snapshot, instanceScope), ['instanceMethodCaptured', 'instanceMethodDead']);
+      assert.deepEqual(deadFieldNames(instanceScope), [['instanceMethodDead']]);
+
+      assert.deepEqual(allContextFields(snapshot, staticScope), ['staticMethodCaptured', 'staticMethodDead']);
+      assert.deepEqual(deadFieldNames(staticScope), [['staticMethodDead']]);
+      assert.notStrictEqual(instanceScope.scopeInfoNodeIndex, staticScope.scopeInfoNodeIndex);
+    });
+
+    it('analyzes contexts created inside class instance and static field initializer expressions', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'class-initializer-context.js');
+      assert.lengthOf(scopes, 2);
+
+      const instanceScope = scopeWithDeadField(scopes, 'instanceInitLocalDead');
+      const staticScope = scopeWithDeadField(scopes, 'staticInitLocalDead');
+
+      assert.deepEqual(allContextFields(snapshot, instanceScope),
+                       ['instanceInitLocalCaptured', 'instanceInitLocalDead']);
+      assert.deepEqual(deadFieldNames(instanceScope), [['instanceInitLocalDead']]);
+
+      assert.deepEqual(allContextFields(snapshot, staticScope), ['staticInitLocalCaptured', 'staticInitLocalDead']);
+      assert.deepEqual(deadFieldNames(staticScope), [['staticInitLocalDead']]);
+      assert.notStrictEqual(instanceScope.scopeInfoNodeIndex, staticScope.scopeInfoNodeIndex);
+    });
+
+    it('analyzes block-scoped fields in a catch body', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'catch.js');
+      assert.lengthOf(scopes, 1);
+      const [bodyScope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, bodyScope), ['catchDead']);
+      assert.deepEqual(deadFieldNames(bodyScope), [['catchDead']]);
+    });
+
+    it('analyzes dead exception variables in catch scopes', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'catch-parameter.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['caught']);
+      assert.deepEqual(deadFieldNames(scope), [['caught']]);
+    });
+
+    it('loads dead context fields from a direct-eval closure', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'direct-eval.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope),
+                       ['.new.target', 'arguments', 'dynamicallyRead', 'maybeDead', 'this']);
+      assert.deepEqual(deadFieldNames(scope), [['.new.target', 'arguments', 'dynamicallyRead', 'maybeDead', 'this']]);
+    });
+
+    it('loads contexts retained by suspended generators', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'generator.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['generatorDead', 'neededAfterYield']);
+      assert.deepEqual(deadFieldNames(scope), [['generatorDead']]);
+    });
+
+    it('loads contexts retained by suspended async functions', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'async.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.deepEqual(allContextFields(snapshot, scope), ['asyncDead', 'neededAfterAwait']);
+      assert.deepEqual(deadFieldNames(scope), [['asyncDead']]);
+    });
+
+    it('parses module scopes and reports their script metadata', async () => {
+      const snapshot = await loadContextFixture();
+      const analysis = snapshot.analyzeContexts();
+      const scopes = scopesForScript(analysis, 'module.js');
+      assert.lengthOf(scopes, 1);
+      const [scope] = scopes;
+
+      assert.isTrue(scope.scriptName === 'module.js' || scope.scriptName.endsWith('/module.js'));
+      assert.deepEqual(allContextFields(snapshot, scope), ['moduleCaptured', 'moduleDead']);
+      assert.deepEqual(deadFieldNames(scope), [['moduleDead']]);
+    });
   });
 
   describe('queryObjects', () => {
