@@ -274,6 +274,24 @@ export class Location {
   }
 }
 
+export interface ScriptMemorySize {
+  total: number;
+}
+
+export interface ScriptMemorySizeForScript extends ScriptMemorySize {
+  scriptId: number;
+  scriptNodeId: number;
+  scriptNodeIndex: number;
+  name: string;
+  isModule: boolean;
+}
+
+export interface ScriptMemorySizes {
+  scripts: ScriptMemorySizeForScript[];
+  shared: ScriptMemorySize;
+  unattributed: ScriptMemorySize;
+}
+
 export interface RetainingEdge {
   edgeIndex: number;
   edgeName: string;

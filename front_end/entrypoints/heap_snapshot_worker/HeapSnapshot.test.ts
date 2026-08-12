@@ -555,6 +555,169 @@ describe('HeapSnapshot', () => {
     }
   });
 
+  it('attributes memory to scripts on demand', async () => {
+    const builder = new HeapSnapshotBuilder();
+    const root = builder.rootNode;
+
+    const addIntEdge = (parent: HeapNode, name: string, value: number): void => {
+      const intNode = new HeapNode('int', 0, 'number');
+      const valueNode = new HeapNode(String(value), 0, 'string');
+      parent.linkNode(intNode, 'internal', name);
+      intNode.linkNode(valueNode, 'internal', 'value');
+    };
+    const addBoolEdge = (parent: HeapNode, name: string, value: boolean): void => {
+      const boolNode = new HeapNode('bool', 0, 'number');
+      const valueNode = new HeapNode(String(value), 0, 'string');
+      parent.linkNode(boolNode, 'internal', name);
+      boolNode.linkNode(valueNode, 'internal', 'value');
+    };
+
+    const script1 = new HeapNode('system / Script / app.js', 10, 'code', 101);
+    const script2 = new HeapNode('system / Script / module.js', 11, 'code', 201);
+    const closure1 = new HeapNode('function1', 40, 'closure', 103);
+    const closure2 = new HeapNode('function2', 41, 'closure', 203);
+    const builtinClosure = new HeapNode('lazyFunction', 0, 'closure', 205);
+    const crossCallerClosure = new HeapNode('crossCaller', 0, 'closure', 401);
+    const crossCalleeClosure = new HeapNode('crossCallee', 0, 'closure', 403);
+    const unattributedCode = new HeapNode('system / Code', 7, 'code', 301);
+    const unattributedClosure = new HeapNode('native_bind', 8, 'closure', 303);
+    const unattributedSharedFunctionInfo = new HeapNode('system / SharedFunctionInfo / native_bind', 5, 'code', 309);
+    const unattributedBytecode = new HeapNode('system / BytecodeArray', 12, 'code', 305);
+    const unattributedSourcePositions = new HeapNode('(source position table)', 3, 'code', 307);
+    root.linkNode(script1, 'element');
+    root.linkNode(script2, 'element');
+    root.linkNode(closure1, 'element');
+    root.linkNode(closure2, 'element');
+    root.linkNode(builtinClosure, 'element');
+    root.linkNode(crossCallerClosure, 'element');
+    root.linkNode(crossCalleeClosure, 'element');
+    root.linkNode(unattributedCode, 'element');
+    root.linkNode(unattributedClosure, 'element');
+    root.linkNode(unattributedSharedFunctionInfo, 'element');
+    root.linkNode(unattributedBytecode, 'element');
+    unattributedClosure.linkNode(unattributedSharedFunctionInfo, 'internal', 'shared');
+    unattributedBytecode.linkNode(unattributedSourcePositions, 'hidden');
+
+    addIntEdge(script1, 'id', 1);
+    addBoolEdge(script1, 'origin_is_module', false);
+    addIntEdge(script2, 'id', 2);
+    addBoolEdge(script2, 'origin_is_module', true);
+
+    // A string that looks like a Script node must still be treated as source storage.
+    const source = new HeapNode('system / Script / not-a-script', 100, 'string', 105);
+    const externalSourceData = new HeapNode('system / ExternalStringData', 20, 'native', 106);
+    script1.linkNode(source, 'internal', 'source');
+    // A weak reference from another Script must not affect source ownership.
+    script2.linkNode(source, 'weak', 'source');
+    source.linkNode(externalSourceData, 'internal', '1 / backing_store');
+    script1.linkNode(new HeapNode('(script line ends)', 5, 'code', 107), 'internal', 'line_ends');
+
+    const sharedFunctionInfo1 = new HeapNode('system / SharedFunctionInfo / function1', 20, 'code', 109);
+    closure1.linkNode(sharedFunctionInfo1, 'internal', 'shared');
+    sharedFunctionInfo1.linkNode(script1, 'internal', 'script');
+    const interpreterData = new HeapNode('system / InterpreterData', 9, 'code', 110);
+    sharedFunctionInfo1.linkNode(interpreterData, 'internal', 'untrusted_function_data');
+    const scopeInfo1 = new HeapNode('(function scope info)', 6, 'code', 108);
+    sharedFunctionInfo1.linkNode(scopeInfo1, 'internal', 'name_or_scope_info');
+    // An eval Script's provenance edge must not claim its caller's ScopeInfo.
+    script2.linkNode(scopeInfo1, 'internal', 'eval_from_scope_info');
+    const bytecode1 = new HeapNode('system / BytecodeArray', 30, 'code', 111);
+    interpreterData.linkNode(bytecode1, 'hidden');
+    const constantPool1 = new HeapNode('(constant pool)', 4, 'code', 113);
+    bytecode1.linkNode(constantPool1, 'hidden');
+    const nestedConstantPool1 = new HeapNode('(constant pool)', 4, 'code', 121);
+    constantPool1.linkNode(nestedConstantPool1, 'hidden');
+    // An unattributed reference must not dilute the Script ownership reached through the pool.
+    constantPool1.linkNode(unattributedSourcePositions, 'hidden');
+
+    const sharedFunctionInfo2 = new HeapNode('system / SharedFunctionInfo / function2', 21, 'code', 209);
+    closure2.linkNode(sharedFunctionInfo2, 'internal', 'shared');
+    sharedFunctionInfo2.linkNode(script2, 'internal', 'script');
+    const closurelessSharedFunctionInfo =
+        new HeapNode('system / SharedFunctionInfo / closureless', 14, 'code', 215);
+    root.linkNode(closurelessSharedFunctionInfo, 'element');
+    closurelessSharedFunctionInfo.linkNode(script2, 'internal', 'script');
+    const bytecode2 = new HeapNode('system / BytecodeArray', 31, 'code', 211);
+    sharedFunctionInfo2.linkNode(bytecode2, 'internal', 'trusted_function_data');
+    // Referencing another script's SFI must not change that SFI's explicit origin.
+    bytecode2.linkNode(sharedFunctionInfo1, 'hidden');
+    const scopeInfo2 = new HeapNode('(function scope info)', 0, 'code', 217);
+    sharedFunctionInfo2.linkNode(scopeInfo2, 'internal', 'name_or_scope_info');
+    // Incidental references must not change multi-hop structural ownership.
+    scopeInfo2.linkNode(bytecode1, 'hidden');
+    scopeInfo2.linkNode(nestedConstantPool1, 'hidden');
+
+    // A user-controlled function name ending in "(builtin)" is not V8 builtin code.
+    const builtinSharedFunctionInfo =
+        new HeapNode('system / SharedFunctionInfo / lazyFunction (builtin)', 2, 'code', 207);
+    builtinClosure.linkNode(builtinSharedFunctionInfo, 'internal', 'shared');
+    builtinSharedFunctionInfo.linkNode(script1, 'internal', 'script');
+
+    const crossCallerSharedFunctionInfo =
+        new HeapNode('system / SharedFunctionInfo / crossCaller', 0, 'code', 405);
+    crossCallerClosure.linkNode(crossCallerSharedFunctionInfo, 'internal', 'shared');
+    crossCallerSharedFunctionInfo.linkNode(script1, 'internal', 'script');
+    const crossCalleeSharedFunctionInfo =
+        new HeapNode('system / SharedFunctionInfo / crossCallee', 0, 'code', 407);
+    crossCalleeClosure.linkNode(crossCalleeSharedFunctionInfo, 'internal', 'shared');
+    crossCalleeSharedFunctionInfo.linkNode(script2, 'internal', 'script');
+
+    const compiledCode = new HeapNode('system / Code', 50, 'code', 115);
+    const instructionStream = new HeapNode('system / InstructionStream', 60, 'code', 117);
+    const relocationInfo = new HeapNode('(code relocation info)', 6, 'code', 119);
+    closure1.linkNode(compiledCode, 'internal', 'code');
+    closure2.linkNode(compiledCode, 'internal', 'code');
+    compiledCode.linkNode(instructionStream, 'internal', 'instruction_stream');
+    instructionStream.linkNode(relocationInfo, 'internal', 'relocation_info');
+
+    const crossCallerCode = new HeapNode('system / Code', 10, 'code', 409);
+    const crossCallerInstructionStream = new HeapNode('system / InstructionStream', 11, 'code', 411);
+    const crossCalleeCode = new HeapNode('system / Code', 12, 'code', 413);
+    const crossCalleeInstructionStream = new HeapNode('system / InstructionStream', 13, 'code', 415);
+    crossCallerClosure.linkNode(crossCallerCode, 'internal', 'code');
+    crossCalleeClosure.linkNode(crossCalleeCode, 'internal', 'code');
+    // Lack of a Script on another function using the same code is not a second owner.
+    unattributedClosure.linkNode(crossCallerCode, 'internal', 'code');
+    crossCallerCode.linkNode(crossCallerInstructionStream, 'internal', 'instruction_stream');
+    crossCalleeCode.linkNode(crossCalleeInstructionStream, 'internal', 'instruction_stream');
+    const deoptimizationData = new HeapNode('(code deopt data)', 3, 'code', 417);
+    const deoptimizationLiteralArray = new HeapNode('(code deopt data)', 4, 'code', 419);
+    crossCallerCode.linkNode(deoptimizationData, 'internal', 'deoptimization_data');
+    deoptimizationData.linkNode(deoptimizationLiteralArray, 'hidden');
+    // A relocation/call-target reference must not change the callee code's defining script.
+    crossCallerInstructionStream.linkNode(crossCalleeInstructionStream, 'hidden');
+    // Nor may incidental references change structural storage ownership.
+    scopeInfo2.linkNode(crossCallerInstructionStream, 'hidden');
+    scopeInfo2.linkNode(deoptimizationLiteralArray, 'hidden');
+
+    const wasmNativeModule = new HeapNode('system / Managed (WasmNativeModule)', 70, 'native', 213);
+    script2.linkNode(wasmNativeModule, 'internal', 'wasm_managed_native_module');
+
+    const snapshot = await builder.createJSHeapSnapshot();
+    const sizes = snapshot.computeScriptMemorySizes();
+
+    assert.deepEqual(sizes.scripts, [
+      {
+        scriptId: 1,
+        scriptNodeId: 101,
+        scriptNodeIndex: snapshot.nodeIndexForId(101),
+        name: 'app.js',
+        isModule: false,
+        total: 281,
+      },
+      {
+        scriptId: 2,
+        scriptNodeId: 201,
+        scriptNodeIndex: snapshot.nodeIndexForId(201),
+        name: 'module.js',
+        isModule: true,
+        total: 213,
+      },
+    ]);
+    assert.deepEqual(sizes.shared, {total: 116});
+    assert.deepEqual(sizes.unattributed, {total: 32});
+  });
+
   it('heapSnapshotRetainedSize', async () => {
     const snapshot = await HeapSnapshotWorker.HeapSnapshot.createJSHeapSnapshotForTesting(createHeapSnapshotMock());
     const actualRetainedSizes = new Array(snapshot.nodeCount);

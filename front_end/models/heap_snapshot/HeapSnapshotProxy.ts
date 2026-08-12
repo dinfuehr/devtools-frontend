@@ -280,6 +280,10 @@ export class HeapSnapshotProxy extends HeapSnapshotProxyObject {
     return this.callMethodPromise('getNativeContextSizes');
   }
 
+  computeScriptMemorySizes(): Promise<HeapSnapshotModel.ScriptMemorySizes> {
+    return this.callMethodPromise('computeScriptMemorySizes');
+  }
+
   getRetainedByContextSummary(): Promise<HeapSnapshotModel.RetainedByContextSummary> {
     return this.callMethodPromise('getRetainedByContextSummary');
   }

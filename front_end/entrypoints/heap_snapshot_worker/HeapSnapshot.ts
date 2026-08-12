@@ -926,6 +926,12 @@ const MIN_OBJECT_PROPORTION_PER_INTERFACE = 1000;
 const NO_NATIVE_CONTEXT = -1;
 const SHARED_NATIVE_CONTEXT = -2;
 
+// Script attribution describes logical ownership rather than retention. A node can be
+// attributed to a Script even though the Script does not dominate it in the heap graph.
+const NO_SCRIPT = -1;
+const SHARED_SCRIPT = -2;
+const UNVISITED_SCRIPT = -3;
+
 export abstract class HeapSnapshot {
   nodes: Platform.TypedArrayUtilities.BigUint32Array;
   containmentEdges: Platform.TypedArrayUtilities.BigUint32Array;
@@ -3207,6 +3213,287 @@ export abstract class HeapSnapshot {
 
   getLocation(nodeIndex: number): HeapSnapshotModel.HeapSnapshotModel.Location|null {
     return this.#locationMap.get(nodeIndex) || null;
+  }
+
+  computeScriptMemorySizes(): HeapSnapshotModel.HeapSnapshotModel.ScriptMemorySizes {
+    const attribution = new Int32Array(this.nodeCount).fill(UNVISITED_SCRIPT);
+    const isFixed = Platform.TypedArrayUtilities.createBitVector(this.nodeCount);
+    const scriptOrdinals: number[] = [];
+    const sharedFunctionInfoOrdinals: number[] = [];
+    const closureOrdinals: number[] = [];
+    const queue: number[] = [];
+    const fixedQueue: number[] = [];
+
+    const node = this.createNode(0);
+    const isScriptOrdinal = (ordinal: number): boolean => {
+      const nodeIndex = ordinal * this.nodeFieldCount;
+      if (this.nodes.getValue(nodeIndex + this.nodeTypeOffset) !== this.nodeCodeType) {
+        return false;
+      }
+      const nameIndex = this.nodes.getValue(nodeIndex + this.nodeNameOffset);
+      const name = this.strings[nameIndex];
+      return name === 'system / Script' || name.startsWith('system / Script / ');
+    };
+    const isSharedFunctionInfoOrdinal = (ordinal: number): boolean => {
+      const nodeIndex = ordinal * this.nodeFieldCount;
+      if (this.nodes.getValue(nodeIndex + this.nodeTypeOffset) !== this.nodeCodeType) {
+        return false;
+      }
+      const nameIndex = this.nodes.getValue(nodeIndex + this.nodeNameOffset);
+      const name = this.strings[nameIndex];
+      return name === 'system / SharedFunctionInfo' || name.startsWith('system / SharedFunctionInfo / ');
+    };
+    const mergeOwner = (current: number, incoming: number): number => {
+      if (current === UNVISITED_SCRIPT) {
+        return incoming;
+      }
+      if (incoming === UNVISITED_SCRIPT) {
+        return current;
+      }
+      if (current === NO_SCRIPT) {
+        return incoming;
+      }
+      if (incoming === NO_SCRIPT) {
+        return current;
+      }
+      return current === incoming ? current : SHARED_SCRIPT;
+    };
+    const assign = (ordinal: number, owner: number, fixed = false): void => {
+      const wasFixed = isFixed.getBit(ordinal);
+      if (wasFixed && !fixed) {
+        return;
+      }
+      const mergedOwner = mergeOwner(attribution[ordinal], owner);
+      if (fixed) {
+        isFixed.setBit(ordinal);
+        if (!wasFixed || mergedOwner !== attribution[ordinal]) {
+          fixedQueue.push(ordinal);
+        }
+      }
+      if (mergedOwner === attribution[ordinal]) {
+        return;
+      }
+      attribution[ordinal] = mergedOwner;
+      queue.push(ordinal);
+    };
+
+    // Discover the objects that define Script ownership. This is independent of the
+    // dominator tree and retained-size calculation.
+    for (let ordinal = 0; ordinal < this.nodeCount; ++ordinal) {
+      node.nodeIndex = ordinal * this.nodeFieldCount;
+      if (isScriptOrdinal(ordinal)) {
+        scriptOrdinals.push(ordinal);
+      } else if (node.rawType() === this.nodeClosureType) {
+        closureOrdinals.push(ordinal);
+      } else if (isSharedFunctionInfoOrdinal(ordinal)) {
+        sharedFunctionInfoOrdinals.push(ordinal);
+      }
+    }
+
+    for (const ordinal of scriptOrdinals) {
+      assign(ordinal, ordinal, true);
+    }
+
+    for (const ordinal of sharedFunctionInfoOrdinals) {
+      node.nodeIndex = ordinal * this.nodeFieldCount;
+      const script = node.findInternalEdgeTarget('script');
+      const owner = script && isScriptOrdinal(script.ordinal()) ? script.ordinal() : NO_SCRIPT;
+      assign(ordinal, owner, true);
+    }
+
+    // Associate functions through JSFunction -> SharedFunctionInfo -> Script.
+    for (const ordinal of closureOrdinals) {
+      node.nodeIndex = ordinal * this.nodeFieldCount;
+      const shared = node.findInternalEdgeTarget('shared');
+      const sharedOwner = shared ? attribution[shared.ordinal()] : UNVISITED_SCRIPT;
+      const owner = sharedOwner === UNVISITED_SCRIPT ? NO_SCRIPT : sharedOwner;
+      assign(ordinal, owner, true);
+    }
+
+    const isFixedCodeOwnershipEdge =
+        (sourceType: number, sourceName: string, edgeName: string, targetName: string): boolean => {
+      if (sourceType === this.nodeClosureType) {
+        return edgeName === 'code';
+      }
+      if (sourceName === 'system / SharedFunctionInfo' ||
+          sourceName.startsWith('system / SharedFunctionInfo / ')) {
+        return edgeName === 'trusted_function_data' || edgeName === 'untrusted_function_data';
+      }
+      if (sourceName === 'system / InterpreterData' || sourceName === '(interpreter data)') {
+        if (targetName.startsWith('system / BytecodeArray') || targetName === '(interpreter data)') {
+          return true;
+        }
+      }
+      // V8 tags these BytecodeArray fields but emits only their hidden slot edges.
+      if (sourceName.startsWith('system / BytecodeArray') || sourceName === '(interpreter data)') {
+        return targetName === '(constant pool)' || targetName === '(handler table)' ||
+            targetName === '(source position table)';
+      }
+      // V8 recursively tags nested constant-pool storage arrays.
+      if (sourceName === '(constant pool)') {
+        return targetName === '(constant pool)';
+      }
+      if (sourceName.startsWith('system / Code')) {
+        return edgeName === 'instruction_stream' || edgeName === 'interpreter_data' ||
+            edgeName === 'bytecode_offset_table' || edgeName === 'deoptimization_data' ||
+            edgeName === 'source_position_table';
+      }
+      if (sourceName === '(code deopt data)') {
+        return targetName === '(code deopt data)';
+      }
+      return sourceName.startsWith('system / InstructionStream') && edgeName === 'relocation_info';
+    };
+
+    // Function-owned code and its structural storage are stronger evidence than references
+    // between code objects. Fix the whole structural chain before general propagation so call
+    // targets cannot change its owner.
+    const fixedNode = this.createNode(0);
+    const fixedEdge = this.createEdge(0);
+    let fixedQueueIndex = 0;
+    while (fixedQueueIndex < fixedQueue.length) {
+      const ordinal = fixedQueue[fixedQueueIndex++];
+      fixedNode.nodeIndex = ordinal * this.nodeFieldCount;
+      const sourceType = fixedNode.rawType();
+      const sourceName = fixedNode.rawName();
+      for (let edgeIndex = fixedNode.edgeIndexesStart(); edgeIndex < fixedNode.edgeIndexesEnd();
+           edgeIndex += this.edgeFieldsCount) {
+        fixedEdge.edgeIndex = edgeIndex;
+        if (fixedEdge.isWeak()) {
+          continue;
+        }
+        const target = fixedEdge.node();
+        if (target.rawType() === this.nodeCodeType &&
+            isFixedCodeOwnershipEdge(sourceType, sourceName, fixedEdge.name(), target.rawName())) {
+          assign(target.ordinal(), attribution[ordinal], true);
+        }
+      }
+    }
+
+    const propagationNode = this.createNode(0);
+    const propagationEdge = this.createEdge(0);
+    let queueIndex = 0;
+    const propagate = (): void => {
+      while (queueIndex < queue.length) {
+        const ordinal = queue[queueIndex++];
+        const owner = attribution[ordinal];
+        // Missing Script attribution is not ownership evidence and must not spread through
+        // incidental references between code objects.
+        if (owner === NO_SCRIPT) {
+          continue;
+        }
+        propagationNode.nodeIndex = ordinal * this.nodeFieldCount;
+        const rawType = propagationNode.rawType();
+        const isScript = isScriptOrdinal(ordinal);
+        const isString = rawType === this.nodeStringType || rawType === this.nodeConsStringType ||
+            rawType === this.nodeSlicedStringType;
+
+        for (let edgeIndex = propagationNode.edgeIndexesStart(); edgeIndex < propagationNode.edgeIndexesEnd();
+             edgeIndex += this.edgeFieldsCount) {
+          propagationEdge.edgeIndex = edgeIndex;
+          if (propagationEdge.isWeak()) {
+            continue;
+          }
+          const edgeName = propagationEdge.name();
+          const target = propagationEdge.node();
+          const targetOrdinal = target.ordinal();
+          const isScopeInfo = target.rawName() === '(function scope info)' ||
+              target.rawName().startsWith('system / ScopeInfo');
+
+          // Eval and outer-scope edges describe provenance and lexical nesting, not storage
+          // owned by the referencing Script or function.
+          if (edgeName === 'eval_from_scope_info' || edgeName === 'outer_scope_info' ||
+              (edgeName === 'raw_outer_scope_info_or_feedback_metadata' && isScopeInfo)) {
+            continue;
+          }
+
+          if (isScript && edgeName === 'source' &&
+              (target.rawType() === this.nodeStringType || target.rawType() === this.nodeConsStringType ||
+               target.rawType() === this.nodeSlicedStringType)) {
+            assign(targetOrdinal, owner);
+            continue;
+          }
+
+          if (isScript && edgeName === 'wasm_managed_native_module' && target.rawType() === this.nodeNativeType) {
+            assign(targetOrdinal, owner);
+            continue;
+          }
+
+          if (isString) {
+            const isStringPart = edgeName === 'first' || edgeName === 'second' || edgeName === 'parent' ||
+                edgeName === 'actual';
+            if (isStringPart || edgeName.endsWith('/ backing_store')) {
+              assign(targetOrdinal, owner);
+            }
+            continue;
+          }
+
+          if ((isScript || rawType === this.nodeCodeType || rawType === this.nodeClosureType) &&
+              target.rawType() === this.nodeCodeType &&
+              !isScriptOrdinal(targetOrdinal)) {
+            if (propagationNode.rawName().startsWith('system / InstructionStream') &&
+                edgeName !== 'relocation_info') {
+              continue;
+            }
+            assign(targetOrdinal, owner);
+          }
+        }
+      }
+    };
+
+    propagate();
+
+    // Keep code that cannot be tied to a Script visible in the unattributed bucket without
+    // treating missing attribution as an owner that can affect other objects.
+    for (let ordinal = 0; ordinal < this.nodeCount; ++ordinal) {
+      node.nodeIndex = ordinal * this.nodeFieldCount;
+      if (node.rawType() === this.nodeCodeType && attribution[ordinal] === UNVISITED_SCRIPT) {
+        attribution[ordinal] = NO_SCRIPT;
+      }
+    }
+
+    const createSizes = (): HeapSnapshotModel.HeapSnapshotModel.ScriptMemorySize => ({
+      total: 0,
+    });
+    const scripts: HeapSnapshotModel.HeapSnapshotModel.ScriptMemorySizeForScript[] = [];
+    const scriptOrdinalToSizes = new Map<number, HeapSnapshotModel.HeapSnapshotModel.ScriptMemorySizeForScript>();
+    for (const ordinal of scriptOrdinals) {
+      node.nodeIndex = ordinal * this.nodeFieldCount;
+      const rawName = node.rawName();
+      const prefix = 'system / Script';
+      const name = rawName.startsWith(`${prefix} / `) ? rawName.substring(prefix.length + 3) : '(anonymous script)';
+      const sizes = {
+        ...createSizes(),
+        scriptId: node.findInternalEdgeTarget('id')?.nodeValueAsInt() ?? -1,
+        scriptNodeId: node.id(),
+        scriptNodeIndex: node.nodeIndex,
+        name,
+        isModule: node.findInternalEdgeTarget('origin_is_module')?.nodeValueAsBool() ?? false,
+      };
+      scripts.push(sizes);
+      scriptOrdinalToSizes.set(ordinal, sizes);
+    }
+    const shared = createSizes();
+    const unattributed = createSizes();
+
+    for (let ordinal = 0; ordinal < this.nodeCount; ++ordinal) {
+      const owner = attribution[ordinal];
+      if (owner === UNVISITED_SCRIPT) {
+        continue;
+      }
+      const size = this.nodes.getValue(ordinal * this.nodeFieldCount + this.nodeSelfSizeOffset);
+      if (owner === SHARED_SCRIPT) {
+        shared.total += size;
+      } else if (owner === NO_SCRIPT) {
+        unattributed.total += size;
+      } else {
+        const sizes = scriptOrdinalToSizes.get(owner);
+        if (sizes) {
+          sizes.total += size;
+        }
+      }
+    }
+
+    return {scripts, shared, unattributed};
   }
 
   getSamples(): HeapSnapshotModel.HeapSnapshotModel.Samples|null {
