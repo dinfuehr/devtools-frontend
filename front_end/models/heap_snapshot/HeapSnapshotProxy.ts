@@ -14,7 +14,7 @@ export class HeapSnapshotWorkerProxy extends Common.ObjectWrapper.ObjectWrapper<
   #console: Common.Console.Console;
   nextObjectId = 1;
   nextCallId = 1;
-  callbacks = new Map<number, (...args: any[]) => void>();
+  callbacks = new Map<number, (result: any, error?: string) => void>();
   readonly previousCallbacks = new Set<number>();
   readonly worker: PlatformApi.HostRuntime.Worker;
   interval?: ReturnType<typeof setInterval>;
@@ -62,7 +62,9 @@ export class HeapSnapshotWorkerProxy extends Common.ObjectWrapper.ObjectWrapper<
 
   evaluateForTest(script: string, callback: (...arg0: any[]) => void): void {
     const callId = this.nextCallId++;
-    this.callbacks.set(callId, callback);
+    this.callbacks.set(callId, (result, error) => {
+      callback(result, error);
+    });
     this.postMessage({callId, disposition: 'evaluateForTest', source: script});
   }
 
@@ -70,18 +72,22 @@ export class HeapSnapshotWorkerProxy extends Common.ObjectWrapper.ObjectWrapper<
       callback: null, objectId: string, methodName: string, proxyConstructor: new(...arg1: any[]) => T,
       transfer: PlatformApi.HostRuntime.WorkerTransferable[], ...methodArguments: any[]): T;
   callFactoryMethod<T extends Object>(
-      callback: ((...arg0: any[]) => void), objectId: string, methodName: string,
+      callback: ((arg0: T | null, error?: string) => void), objectId: string, methodName: string,
       proxyConstructor: new(...arg1: any[]) => T, transfer: PlatformApi.HostRuntime.WorkerTransferable[],
       ...methodArguments: any[]): null;
   callFactoryMethod<T extends Object>(
-      callback: ((...arg0: any[]) => void)|null, objectId: string, methodName: string,
+      callback: ((arg0: T | null, error?: string) => void)|null, objectId: string, methodName: string,
       proxyConstructor: new(...arg1: any[]) => T, transfer: PlatformApi.HostRuntime.WorkerTransferable[],
       ...methodArguments: any[]): T|null {
     const callId = this.nextCallId++;
     const newObjectId = this.nextObjectId++;
 
     if (callback) {
-      this.callbacks.set(callId, remoteResult => {
+      this.callbacks.set(callId, (remoteResult, error) => {
+        if (error) {
+          callback(null, error);
+          return;
+        }
         callback(remoteResult ? new proxyConstructor(this, newObjectId) : null);
       });
       this.postMessage(
@@ -109,11 +115,13 @@ export class HeapSnapshotWorkerProxy extends Common.ObjectWrapper.ObjectWrapper<
     return new proxyConstructor(this, newObjectId);
   }
 
-  callMethod(callback: (...arg0: any[]) => void, objectId: string, methodName: string, ...methodArguments: any[]):
+  callMethod(callback: ((...arg0: any[]) => void)|null, objectId: string, methodName: string, ...methodArguments: any[]):
       void {
     const callId = this.nextCallId++;
     if (callback) {
-      this.callbacks.set(callId, callback);
+      this.callbacks.set(callId, (result, error) => {
+        callback(result, error);
+      });
     }
     this.postMessage({
       callId,
@@ -147,8 +155,14 @@ export class HeapSnapshotWorkerProxy extends Common.ObjectWrapper.ObjectWrapper<
 
   setupForSecondaryInit(port: MessagePort): Promise<void> {
     const callId = this.nextCallId++;
-    const done = new Promise<void>(resolve => {
-      this.callbacks.set(callId, resolve);
+    const done = new Promise<void>((resolve, reject) => {
+      this.callbacks.set(callId, (_result, error) => {
+        if (error) {
+          reject(new Error(error));
+        } else {
+          resolve();
+        }
+      });
     });
     this.postMessage(
         {
@@ -168,17 +182,17 @@ export class HeapSnapshotWorkerProxy extends Common.ObjectWrapper.ObjectWrapper<
       }
       return;
     }
-    if (data.error) {
-      this.#console.error(`An error occurred when a call to method '${data.errorMethodName}' was requested`);
-      this.#console.error(data['errorCallStack']);
-      this.callbacks.delete(data.callId);
-      return;
-    }
     const callback = this.callbacks.get(data.callId);
     if (!callback) {
       return;
     }
     this.callbacks.delete(data.callId);
+    if (data.error) {
+      this.#console.error(`An error occurred when a call to method '${data.errorMethodName}' was requested`);
+      this.#console.error(data['errorCallStack']);
+      callback(null, data.error);
+      return;
+    }
     callback(data.result);
   }
 
@@ -218,12 +232,27 @@ export class HeapSnapshotProxyObject {
       methodName: string, proxyConstructor: new(...arg1: any[]) => T,
       transfer: PlatformApi.HostRuntime.WorkerTransferable[], ...args: any[]): Promise<T> {
     return new Promise(
-        resolve => this.worker.callFactoryMethod(
-            resolve, String(this.objectId), methodName, proxyConstructor, transfer, ...args));
+        (resolve, reject) => this.worker.callFactoryMethod(
+            (result, error) => {
+              if (error) {
+                reject(new Error(error));
+              } else if (result) {
+                resolve(result);
+              } else {
+                reject(new Error(`Failed to create ${proxyConstructor.name}`));
+              }
+            },
+            String(this.objectId), methodName, proxyConstructor, transfer, ...args));
   }
 
   callMethodPromise<T>(methodName: string, ...args: any[]): Promise<T> {
-    return new Promise(resolve => this.worker.callMethod(resolve, String(this.objectId), methodName, ...args));
+    return new Promise((resolve, reject) => this.worker.callMethod((result, error) => {
+      if (error) {
+        reject(new Error(error));
+      } else {
+        resolve(result);
+      }
+    }, String(this.objectId), methodName, ...args));
   }
 }
 
@@ -250,12 +279,15 @@ export class HeapSnapshotLoaderProxy extends HeapSnapshotProxyObject implements 
     const secondWorker = new HeapSnapshotWorkerProxy(() => {}, this.worker.console, this.worker.workerUrl);
     const channel = new MessageChannel();
     await secondWorker.setupForSecondaryInit(channel.port2);
-    const snapshotProxy = await this.callFactoryMethodPromise('buildSnapshot', HeapSnapshotProxy, [channel.port1]);
-    secondWorker.dispose();
-    this.dispose();
-    snapshotProxy.setProfileUid(this.profileUid);
-    await snapshotProxy.updateStaticData();
-    this.snapshotReceivedCallback(snapshotProxy);
+    try {
+      const snapshotProxy = await this.callFactoryMethodPromise('buildSnapshot', HeapSnapshotProxy, [channel.port1]);
+      snapshotProxy.setProfileUid(this.profileUid);
+      await snapshotProxy.updateStaticData();
+      this.snapshotReceivedCallback(snapshotProxy);
+    } finally {
+      secondWorker.dispose();
+      this.dispose();
+    }
   }
 }
 
