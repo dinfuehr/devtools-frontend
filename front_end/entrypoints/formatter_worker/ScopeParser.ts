@@ -5,7 +5,7 @@
 import * as Acorn from '../../third_party/acorn/acorn.js';
 
 import {ECMA_VERSION} from './AcornTokenizer.js';
-import {DefinitionKind, ScopeKind, type ScopeTreeNode} from './FormatterActions.js';
+import {type ContextVariableUse, DefinitionKind, ScopeKind, type ScopeTreeNode} from './FormatterActions.js';
 
 export function parseScopes(expression: string, sourceType: 'module'|'script' = 'script'): Scope|null {
   // Parse the expression and find variables and scopes.
@@ -61,7 +61,12 @@ export class Scope {
       for (const use of variable[1].uses) {
         offsets.push(use.offset);
       }
-      variables.push({name: variable[0], kind: variable[1].definitionKind, offsets});
+      variables.push({
+        name: variable[0],
+        kind: variable[1].definitionKind,
+        offsets,
+        contextUses: this.#contextUses(variable[1]),
+      });
     }
     const children = this.children.map(c => c.export());
     return {
@@ -73,6 +78,33 @@ export class Scope {
       nameMappingLocations: this.nameMappingLocations,
       children,
     };
+  }
+
+  #contextUses(variable: VariableUses): ContextVariableUse[] {
+    if (variable.definitionKind === DefinitionKind.NONE) {
+      return [];
+    }
+
+    const definingFunction = containingFunction(this);
+    const offsetsByFunction = new Map<Scope, number[]>();
+    for (const use of variable.uses) {
+      const usingFunction = containingFunction(use.scope);
+      if (usingFunction === definingFunction) {
+        continue;
+      }
+      const offsets = offsetsByFunction.get(usingFunction);
+      if (offsets) {
+        offsets.push(use.offset);
+      } else {
+        offsetsByFunction.set(usingFunction, [use.offset]);
+      }
+    }
+
+    return [...offsetsByFunction].map(([scope, offsets]) => ({
+                                        functionStart: scope.start,
+                                        functionEnd: scope.end,
+                                        offsets,
+                                      }));
   }
 
   addVariable(name: string, offset: number, definitionKind: DefinitionKind, isShorthandAssignmentProperty: boolean):
@@ -512,6 +544,15 @@ export class ScopeVariableAnalysis {
     this.#processNodeAsDefinition(definitionKind, false, decl.id);
     this.#processNode(decl.init ?? null);
   }
+}
+
+function containingFunction(scope: Scope): Scope {
+  let current = scope;
+  while (current.parent && current.kind !== ScopeKind.FUNCTION && current.kind !== ScopeKind.ARROW_FUNCTION &&
+         current.kind !== ScopeKind.GLOBAL) {
+    current = current.parent;
+  }
+  return current;
 }
 
 function mappingLocationsForFunctionDeclaration(node: Acorn.ESTree.FunctionDeclaration, sourceText: string): number[] {

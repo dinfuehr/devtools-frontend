@@ -52,7 +52,7 @@ export const enum ScopeKind {
 }
 
 export interface ScopeTreeNode {
-  variables: Array<{name: string, kind: DefinitionKind, offsets: number[]}>;
+  variables: ScopeVariable[];
   start: number;
   end: number;
   // If present, apply source map mappings to these locations to figure out the original function name.
@@ -60,4 +60,17 @@ export interface ScopeTreeNode {
   name?: string;
   kind: ScopeKind;
   children: ScopeTreeNode[];
+}
+
+export interface ScopeVariable {
+  name: string;
+  kind: DefinitionKind;
+  offsets: number[];
+  contextUses: ContextVariableUse[];
+}
+
+export interface ContextVariableUse {
+  functionStart: number;
+  functionEnd: number;
+  offsets: number[];
 }

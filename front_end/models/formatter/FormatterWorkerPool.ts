@@ -6,7 +6,13 @@ import type * as PlatformApi from '../../core/platform/api/api.js';
 import * as Platform from '../../core/platform/platform.js';
 import * as FormatterActions from '../../entrypoints/formatter_worker/FormatterActions.js';  // eslint-disable-line @devtools/es-modules-import
 
-export {DefinitionKind, ScopeKind, type ScopeTreeNode} from '../../entrypoints/formatter_worker/FormatterActions.js';
+export {
+  type ContextVariableUse,
+  DefinitionKind,
+  ScopeKind,
+  type ScopeTreeNode,
+  type ScopeVariable,
+} from '../../entrypoints/formatter_worker/FormatterActions.js';
 
 let formatterWorkerPoolInstance: FormatterWorkerPool|undefined;
 
